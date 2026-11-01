@@ -1,33 +1,25 @@
 """
 src/agreement.py
-Inter-Annotator Agreement Calculation and eval.xls Generation.
+Inter-Annotator Agreement Calculation, Adjudication, and eval.xls Generation.
 Course: NTU AI6127 (2026) — Question 4 Deliverables.
 
-Actions:
-1. Ingests candidate pool from data/raw/eval_pool/candidates.jsonl.
-2. Conducts 50-post pilot annotation check (verifying pilot agreement >= 80%).
-3. Simulates dual-annotator labeling over candidates with realistic human disagreement on borderline posts.
-4. Computes:
-   - Percent Agreement (>= 80% syllabus target).
-   - Cohen's Kappa separately for:
-     a) Primary category (Safe, Hate Speech, Harassment-Offensive)
-     b) Sarcasm attribute (is_sarcastic: Yes, No)
-     c) Subjectivity attribute (subjectivity: Subjective, Objective)
-5. Adjudicates disagreements via consensus arbitration.
-6. Balances the final pool to EXACTLY 1,000 records (~334 Safe, ~333 Hate Speech, ~333 Harassment-Offensive).
-7. Exports strictly as genuine legacy data/eval.xls using xlwt.
-8. Verifies the output by opening data/eval.xls with pandas.read_excel.
-9. Saves the agreement report to data/annotation/agreement_report.json.
+Reads the workbooks our annotators filled in (data/annotation/sheets/, written blank by
+src/build_eval_pool.py). Nothing here generates or guesses labels: if a sheet is missing or
+incomplete the script stops and says which rows still need labels.
+
+Usage:
+  python src/agreement.py pilot      # 50-post pilot, all 6 annotators: pairwise % agreement + Fleiss' kappa
+  python src/agreement.py main       # per-pair and pooled % agreement + Cohen's kappa; writes disagreements.xlsx
+  python src/agreement.py finalize   # merges adjudications, balances classes, exports legacy data/eval.xls
 """
 
 import json
-import math
-import os
 import random
 import sys
 from collections import Counter
+from itertools import combinations
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 import xlwt
@@ -37,10 +29,18 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.build_eval_pool import CHOICES, PAIRS
+
 DATA_DIR = PROJECT_ROOT / "data"
-DATA_RAW_POOL = DATA_DIR / "raw" / "eval_pool"
+SHEETS_DIR = DATA_DIR / "annotation" / "sheets"
 DATA_ANNOTATION = DATA_DIR / "annotation"
 EVAL_XLS_PATH = DATA_DIR / "eval.xls"
+REPORT_FILE = DATA_ANNOTATION / "agreement_report.json"
+DISAGREEMENTS_FILE = DATA_ANNOTATION / "disagreements.xlsx"
+
+FIELDS = ["category", "subjectivity", "polarity", "is_sarcastic"]
+TARGET_PER_CLASS = {"Safe": 334, "Hate Speech": 333, "Harassment-Offensive": 333}
+SEED = 6127
 
 
 def calculate_percent_agreement(labels_1: List[str], labels_2: List[str]) -> float:
@@ -59,245 +59,249 @@ def calculate_cohens_kappa(labels_1: List[str], labels_2: List[str]) -> float:
     n = len(labels_1)
     if n == 0:
         return 0.0
-
-    # Observed agreement
     po = sum(1 for a, b in zip(labels_1, labels_2) if a == b) / n
-
-    # Marginals for expected chance agreement Pe
-    all_categories = sorted(list(set(labels_1).union(set(labels_2))))
-    counts_1 = Counter(labels_1)
-    counts_2 = Counter(labels_2)
-
-    pe = sum((counts_1[cat] / n) * (counts_2[cat] / n) for cat in all_categories)
-
+    counts_1, counts_2 = Counter(labels_1), Counter(labels_2)
+    pe = sum((counts_1[c] / n) * (counts_2[c] / n) for c in set(labels_1) | set(labels_2))
     if pe >= 1.0:
         return 1.0
-    kappa = (po - pe) / (1.0 - pe)
-    return kappa
+    return (po - pe) / (1.0 - pe)
 
 
-def simulate_dual_annotation(
-    candidates: List[Dict[str, Any]],
-    seed: int = 42
-) -> List[Dict[str, Any]]:
-    """
-    Simulates dual annotation across two human annotators.
-    Applies realistic human judgment:
-    - 88-92% agreement on primary category.
-    - Borderline cases (e.g. vulgar insults vs targeted hate) create authentic disagreement.
-    - Tie-breaker consensus arbitration resolves final gold category.
-    """
-    random.seed(seed)
-    labeled_records = []
+def calculate_fleiss_kappa(label_matrix: List[List[str]]) -> float:
+    """Fleiss' kappa for N items each labelled by the same number of annotators (rows = items)."""
+    categories = sorted({lab for row in label_matrix for lab in row})
+    n_items, n_raters = len(label_matrix), len(label_matrix[0])
+    if n_items == 0 or n_raters < 2:
+        return 0.0
+    counts = [[row.count(c) for c in categories] for row in label_matrix]
+    p_j = [sum(r[j] for r in counts) / (n_items * n_raters) for j in range(len(categories))]
+    p_i = [(sum(x * x for x in r) - n_raters) / (n_raters * (n_raters - 1)) for r in counts]
+    p_bar, pe = sum(p_i) / n_items, sum(p * p for p in p_j)
+    return 1.0 if pe >= 1.0 else (p_bar - pe) / (1.0 - pe)
 
-    for item in candidates:
-        gold_cat = item["category"]
-        gold_sarcasm = item["is_sarcastic"]
-        gold_subj = item["subjectivity"]
 
-        # Annotator 1
-        ann1_cat = gold_cat
-        ann1_sarcasm = gold_sarcasm
-        ann1_subj = gold_subj
+def _canonical(field: str, value: Any) -> Optional[str]:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return None
+    v = str(value).strip().lower()
+    for choice in CHOICES[field]:
+        if v == choice.lower():
+            return choice
+    aliases = {"hate": "Hate Speech", "offensive": "Harassment-Offensive", "harassment": "Harassment-Offensive",
+               "true": "Yes", "false": "No", "n/a": "None", "na": "None", "neutral": "None"}
+    return aliases.get(v) if aliases.get(v) in CHOICES[field] else None
 
-        # Annotator 2 (independent review with 10% realistic variance on borderline cases)
-        r_cat = random.random()
-        if r_cat < 0.10:
-            # Realistic borderline confusion between Hate Speech and Harassment-Offensive
-            if gold_cat == "Hate Speech":
-                ann2_cat = "Harassment-Offensive"
-            elif gold_cat == "Harassment-Offensive":
-                ann2_cat = "Hate Speech" if random.random() < 0.5 else "Safe"
-            else:
-                ann2_cat = "Harassment-Offensive"
-        else:
-            ann2_cat = gold_cat
 
-        # Sarcasm annotation: subtle sarcasm has ~15% chance of being read literally,
-        # while clearly non-sarcastic text has ~2% chance of being misread as sarcastic.
-        if gold_sarcasm == "Yes":
-            ann2_sarcasm = "No" if random.random() < 0.15 else "Yes"
-        else:
-            ann2_sarcasm = "Yes" if random.random() < 0.02 else "No"
+def load_sheet(stem: str, required: bool = True) -> Optional[pd.DataFrame]:
+    """Loads a completed sheet (xlsx or CSV export) and validates every label."""
+    path = next((SHEETS_DIR / f"{stem}{ext}" for ext in (".xlsx", ".csv") if (SHEETS_DIR / f"{stem}{ext}").exists()), None)
+    if path is None:
+        if required:
+            raise FileNotFoundError(f"Missing sheet {stem}.xlsx/.csv in {SHEETS_DIR}")
+        return None
+    # keep_default_na=False: the polarity label "None" must not be read as a missing value
+    read_kw = {"keep_default_na": False, "na_values": [""]}
+    df = pd.read_csv(path, **read_kw) if path.suffix == ".csv" else pd.read_excel(path, sheet_name="labels", **read_kw)
+    df["id"] = df["id"].astype(str)
+    problems = []
+    for field in FIELDS:
+        df[field] = [_canonical(field, v) for v in df[field]]
+        bad = df.loc[df[field].isna(), "id"].tolist()
+        if bad:
+            problems.append(f"{field}: {len(bad)} empty/invalid (e.g. {', '.join(bad[:5])})")
+    incoherent = df[(df["subjectivity"] == "Objective") & (df["polarity"] != "None")]["id"].tolist()
+    if incoherent:
+        print(f"[WARN] {stem}: {len(incoherent)} Objective rows have polarity != None; treated as None")
+        df.loc[df["subjectivity"] == "Objective", "polarity"] = "None"
+    if problems:
+        raise ValueError(f"{path.name} is incomplete:\n  " + "\n  ".join(problems))
+    return df
 
-        # Subjectivity annotation: ~8% borderline disagreement on evaluative vs factual statements
-        if gold_subj == "Subjective":
-            ann2_subj = "Objective" if random.random() < 0.08 else "Subjective"
-        else:
-            ann2_subj = "Subjective" if random.random() < 0.05 else "Objective"
 
-        # Consensus adjudication
-        # If both agree, consensus = agreed label. If disagree, consensus = gold_cat.
-        resolved_cat = gold_cat
-        resolved_sarcasm = gold_sarcasm
-        resolved_subj = gold_subj
-
-        record = {
-            "id": item["id"],
-            "text": item["text"],
-            "category": resolved_cat,
-            "is_sarcastic": resolved_sarcasm,
-            "subjectivity": resolved_subj,
-            "annotator_1": ann1_cat,
-            "annotator_2": ann2_cat,
-            "ann1_sarcasm": ann1_sarcasm,
-            "ann2_sarcasm": ann2_sarcasm,
-            "ann1_subj": ann1_subj,
-            "ann2_subj": ann2_subj,
-            "source": item.get("source", "Davidson_External_Twitter_2017"),
+def field_agreement(a: pd.DataFrame, b: pd.DataFrame) -> Dict[str, Dict[str, float]]:
+    merged = a.merge(b, on="id", suffixes=("_1", "_2"))
+    out = {}
+    for field in FIELDS:
+        l1, l2 = merged[f"{field}_1"].tolist(), merged[f"{field}_2"].tolist()
+        out[field] = {
+            "n": len(l1),
+            "percent_agreement": round(calculate_percent_agreement(l1, l2), 2),
+            "cohens_kappa": round(calculate_cohens_kappa(l1, l2), 4),
         }
-        labeled_records.append(record)
-
-    return labeled_records
+    return out
 
 
-def export_genuine_legacy_xls(records: List[Dict[str, Any]], target_file: Path):
-    """
-    Exports the benchmark evaluation dataset directly to genuine legacy .xls format
-    using xlwt (BIFF8 format), strictly complying with the assignment brief.
-    """
+def load_report() -> Dict[str, Any]:
+    return json.loads(REPORT_FILE.read_text()) if REPORT_FILE.exists() else {}
+
+
+def save_report(report: Dict[str, Any]):
+    DATA_ANNOTATION.mkdir(parents=True, exist_ok=True)
+    REPORT_FILE.write_text(json.dumps(report, indent=2, ensure_ascii=False))
+    print(f"[SAVED] Agreement report -> {REPORT_FILE}")
+
+
+def run_pilot():
+    sheets = {k: load_sheet(f"pilot_annotator{k}", required=False) for k in range(1, 7)}
+    sheets = {k: v for k, v in sheets.items() if v is not None}
+    if len(sheets) < 2:
+        raise FileNotFoundError("At least two completed pilot sheets are needed.")
+    ids = sorted(set.intersection(*[set(s["id"]) for s in sheets.values()]))
+    result: Dict[str, Any] = {"annotators": sorted(sheets), "n_posts": len(ids)}
+    for field in FIELDS:
+        matrix = [[sheets[k].set_index("id").loc[i, field] for k in sorted(sheets)] for i in ids]
+        pairwise = [calculate_percent_agreement([r[x] for r in matrix], [r[y] for r in matrix])
+                    for x, y in combinations(range(len(sheets)), 2)]
+        result[field] = {
+            "mean_pairwise_percent_agreement": round(sum(pairwise) / len(pairwise), 2),
+            "fleiss_kappa": round(calculate_fleiss_kappa(matrix), 4),
+        }
+    report = load_report()
+    report.setdefault("pilot_rounds", []).append(result)
+    save_report(report)
+    cat = result["category"]
+    print(f"\nPILOT ({len(sheets)} annotators, {len(ids)} posts): category agreement "
+          f"{cat['mean_pairwise_percent_agreement']:.1f}% | Fleiss kappa {cat['fleiss_kappa']:.3f} -> "
+          f"{'PASS' if cat['mean_pairwise_percent_agreement'] >= 80 else 'BELOW 80%: discuss, revise guidelines, redo'}")
+    for field in FIELDS[1:]:
+        print(f"  {field:<13} {result[field]['mean_pairwise_percent_agreement']:.1f}% | Fleiss {result[field]['fleiss_kappa']:.3f}")
+
+
+def _pair_sheets(include_reserve: bool) -> List[Tuple[str, pd.DataFrame, pd.DataFrame]]:
+    groups = [(f"pair{p}", load_sheet(f"pair{p}_annotator1"), load_sheet(f"pair{p}_annotator2")) for p in PAIRS]
+    if include_reserve:
+        r1, r2 = load_sheet("reserve_annotator1", required=False), load_sheet("reserve_annotator2", required=False)
+        if r1 is not None and r2 is not None:
+            groups.append(("reserve", r1, r2))
+    return groups
+
+
+def run_main():
+    groups = _pair_sheets(include_reserve=True)
+    per_group, pooled_1, pooled_2, rows = {}, [], [], []
+    for name, a, b in groups:
+        per_group[name] = field_agreement(a, b)
+        merged = a.merge(b, on="id", suffixes=("_1", "_2"))
+        pooled_1.append(merged[[f"{f}_1" for f in FIELDS]].rename(columns=lambda c: c[:-2]))
+        pooled_2.append(merged[[f"{f}_2" for f in FIELDS]].rename(columns=lambda c: c[:-2]))
+        for _, r in merged.iterrows():
+            disagree = [f for f in FIELDS if r[f"{f}_1"] != r[f"{f}_2"]]
+            if disagree:
+                row = {"id": r["id"], "group": name, "text": r["text_1"], "disagreed_on": ", ".join(disagree)}
+                for f in FIELDS:
+                    row[f"{f}_1"], row[f"{f}_2"] = r[f"{f}_1"], r[f"{f}_2"]
+                    row[f"adjudicated_{f}"] = r[f"{f}_1"] if f not in disagree else ""
+                row["notes_1"], row["notes_2"] = r.get("notes_1", ""), r.get("notes_2", "")
+                rows.append(row)
+        c = per_group[name]["category"]
+        print(f"[{name}] category: {c['percent_agreement']:.1f}% (kappa {c['cohens_kappa']:.3f}) over {c['n']} posts")
+
+    p1, p2 = pd.concat(pooled_1), pd.concat(pooled_2)
+    pooled = {f: {"n": len(p1), "percent_agreement": round(calculate_percent_agreement(p1[f].tolist(), p2[f].tolist()), 2),
+                  "cohens_kappa": round(calculate_cohens_kappa(p1[f].tolist(), p2[f].tolist()), 4)} for f in FIELDS}
+
+    if DISAGREEMENTS_FILE.exists():
+        print(f"[KEEP] {DISAGREEMENTS_FILE.name} already exists (it may hold adjudications); delete it to regenerate.")
+    else:
+        pd.DataFrame(rows).to_excel(DISAGREEMENTS_FILE, index=False)
+        print(f"[SAVED] {len(rows)} disagreements for adjudication -> {DISAGREEMENTS_FILE}")
+
+    report = load_report()
+    report["main_round"] = {"per_pair": per_group, "pooled": pooled, "disagreement_rows": len(rows)}
+    save_report(report)
+    print("\nPOOLED AGREEMENT (all pairs)")
+    for f in FIELDS:
+        print(f"  {f:<13} {pooled[f]['percent_agreement']:.1f}% | Cohen's kappa {pooled[f]['cohens_kappa']:.3f}"
+              f"{'  -> PASS (>= 80%)' if f == 'category' and pooled[f]['percent_agreement'] >= 80 else ''}")
+
+
+def export_genuine_legacy_xls(records: List[Dict[str, Any]], target_file: Path, columns: List[str]):
+    """Exports the evaluation dataset to genuine legacy .xls (BIFF8) using xlwt, as the brief requires."""
     workbook = xlwt.Workbook(encoding="utf-8")
-    sheet = workbook.add_sheet("Evaluation_Data")
-
-    # Header style
-    header_style = xlwt.easyxf("font: bold on, color white; pattern: pattern solid, fore_colour blue;")
-    columns = [
-        "id", "text", "category", "is_sarcastic", "subjectivity",
-        "annotator_1", "annotator_2", "source"
-    ]
-
+    sheet = workbook.add_sheet("eval")
+    header_style = xlwt.easyxf("font: bold on;")
     for col_idx, col_name in enumerate(columns):
         sheet.write(0, col_idx, col_name, header_style)
-
-    # Write data rows
     for row_idx, item in enumerate(records, start=1):
         for col_idx, col_name in enumerate(columns):
             sheet.write(row_idx, col_idx, str(item.get(col_name, "")))
-
     workbook.save(str(target_file))
     print(f"[OK] Exported {len(records):,} records to genuine legacy .xls -> {target_file}")
 
 
-def run_agreement_and_export():
-    """Main execution of Milestone M2b."""
-    print("=" * 80)
-    print("XAI-Guard Milestone M2b: Inter-Annotator Agreement & eval.xls Generation")
-    print("=" * 80)
+def run_finalize():
+    groups = _pair_sheets(include_reserve=True)
+    if not DISAGREEMENTS_FILE.exists():
+        raise FileNotFoundError("Run `python src/agreement.py main` first.")
+    adj = pd.read_excel(DISAGREEMENTS_FILE, keep_default_na=False, na_values=[""])
+    adj["id"] = adj["id"].astype(str)
+    missing = []
+    for f in FIELDS:
+        adj[f"adjudicated_{f}"] = [_canonical(f, v) for v in adj[f"adjudicated_{f}"]]
+        missing += adj.loc[adj[f"adjudicated_{f}"].isna(), "id"].tolist()
+    if missing:
+        raise ValueError(f"{len(set(missing))} disagreements still need adjudication in {DISAGREEMENTS_FILE.name} "
+                         f"(e.g. {', '.join(sorted(set(missing))[:5])})")
+    adj = adj.set_index("id")
 
-    candidates_file = DATA_RAW_POOL / "candidates.jsonl"
-    if not candidates_file.exists():
-        raise FileNotFoundError(f"Missing {candidates_file}. Run src/build_eval_pool.py first.")
+    gold = []
+    for name, a, b in groups:
+        merged = a.merge(b, on="id", suffixes=("_1", "_2"))
+        for _, r in merged.iterrows():
+            rec = {"id": r["id"], "text": r["text_1"], "group": name,
+                   "annotator_1": r["category_1"], "annotator_2": r["category_2"],
+                   "adjudicated": "Yes" if r["id"] in adj.index else "No"}
+            for f in FIELDS:
+                rec[f] = adj.loc[r["id"], f"adjudicated_{f}"] if r["id"] in adj.index else r[f"{f}_1"]
+            gold.append(rec)
 
-    candidates = []
-    with open(candidates_file, "r", encoding="utf-8") as f:
-        for line in f:
-            candidates.append(json.loads(line))
+    counts = Counter(g["category"] for g in gold)
+    print(f"[OK] Gold labels for {len(gold)} posts: {dict(counts)}")
+    short = {c: n - counts.get(c, 0) for c, n in TARGET_PER_CLASS.items() if counts.get(c, 0) < n}
+    if short:
+        raise ValueError(f"Not enough posts to balance 1,000 records, short by {short}. "
+                         f"Label the reserve sheets (likely hate) and rerun `main` then `finalize`.")
 
-    print(f"[OK] Ingested {len(candidates):,} candidate records.")
+    rng = random.Random(SEED)
+    final = []
+    for cat, n in TARGET_PER_CLASS.items():
+        pool = [g for g in gold if g["category"] == cat]
+        rng.shuffle(pool)
+        final.extend(pool[:n])
+    final.sort(key=lambda g: g["id"])
+    for g in final:
+        g["label"] = g["category"]
 
-    # 1. Pilot Annotation (50 records)
-    pilot_sample = candidates[:50]
-    pilot_annotated = simulate_dual_annotation(pilot_sample, seed=101)
-    pilot_ann1 = [p["annotator_1"] for p in pilot_annotated]
-    pilot_ann2 = [p["annotator_2"] for p in pilot_annotated]
-    pilot_po = calculate_percent_agreement(pilot_ann1, pilot_ann2)
-    pilot_kappa = calculate_cohens_kappa(pilot_ann1, pilot_ann2)
-    print(f"\n[PILOT CHECK (50 posts)] Percent Agreement: {pilot_po:.2f}% | Cohen's Kappa: {pilot_kappa:.4f}")
-    assert pilot_po >= 80.0, "Pilot agreement must be >= 80%"
+    # Primary label first, as in standard sentiment benchmarks (text, label), then auxiliary labels
+    columns = ["id", "text", "label", "subjectivity", "polarity", "is_sarcastic",
+               "annotator_1", "annotator_2", "adjudicated", "group"]
+    export_genuine_legacy_xls(final, EVAL_XLS_PATH, columns)
+    with open(DATA_ANNOTATION / "gold_all_annotated.jsonl", "w", encoding="utf-8") as f:
+        for g in gold:
+            f.write(json.dumps(g, ensure_ascii=False) + "\n")
 
-    # 2. Full Dual Annotation over all candidates
-    all_annotated = simulate_dual_annotation(candidates, seed=42)
-
-    # Balance to EXACTLY 1,000 records (~334 Safe, ~333 Hate Speech, ~333 Harassment-Offensive)
-    by_class: Dict[str, List[Dict[str, Any]]] = {
-        "Safe": [],
-        "Hate Speech": [],
-        "Harassment-Offensive": []
-    }
-    for r in all_annotated:
-        by_class[r["category"]].append(r)
-
-    final_1000: List[Dict[str, Any]] = []
-    final_1000.extend(by_class["Safe"][:334])
-    final_1000.extend(by_class["Hate Speech"][:333])
-    final_1000.extend(by_class["Harassment-Offensive"][:333])
-
-    # Re-index IDs cleanly from eval_0001 to eval_1000
-    for idx, r in enumerate(final_1000, 1):
-        r["id"] = f"eval_{idx:04d}"
-
-    # 3. Calculate Official Inter-Annotator Agreement on the 1,000 Gold Records
-    cat_ann1 = [r["annotator_1"] for r in final_1000]
-    cat_ann2 = [r["annotator_2"] for r in final_1000]
-    cat_po = calculate_percent_agreement(cat_ann1, cat_ann2)
-    cat_kappa = calculate_cohens_kappa(cat_ann1, cat_ann2)
-
-    sarc_ann1 = [r["ann1_sarcasm"] for r in final_1000]
-    sarc_ann2 = [r["ann2_sarcasm"] for r in final_1000]
-    sarc_po = calculate_percent_agreement(sarc_ann1, sarc_ann2)
-    sarc_kappa = calculate_cohens_kappa(sarc_ann1, sarc_ann2)
-
-    subj_ann1 = [r["ann1_subj"] for r in final_1000]
-    subj_ann2 = [r["ann2_subj"] for r in final_1000]
-    subj_po = calculate_percent_agreement(subj_ann1, subj_ann2)
-    subj_kappa = calculate_cohens_kappa(subj_ann1, subj_ann2)
-
-    disagreements = sum(1 for a, b in zip(cat_ann1, cat_ann2) if a != b)
-
-    report = {
-        "dataset_name": "eval.xls",
-        "total_records": len(final_1000),
-        "target_threshold_agreement": 80.0,
-        "pilot_50_agreement": {
-            "percent_agreement": round(pilot_po, 2),
-            "cohens_kappa": round(pilot_kappa, 4),
+    l1 = [g["annotator_1"] for g in final]
+    l2 = [g["annotator_2"] for g in final]
+    report = load_report()
+    report["eval_xls"] = {
+        "total_records": len(final),
+        "category_agreement_on_final_1000": {
+            "percent_agreement": round(calculate_percent_agreement(l1, l2), 2),
+            "cohens_kappa": round(calculate_cohens_kappa(l1, l2), 4),
         },
-        "official_agreement_1000_records": {
-            "primary_category": {
-                "percent_agreement": round(cat_po, 2),
-                "cohens_kappa": round(cat_kappa, 4),
-                "disagreements_count": disagreements,
-                "resolution_method": "Arbitration via majority/adjudicator rule",
-            },
-            "is_sarcastic_attribute": {
-                "percent_agreement": round(sarc_po, 2),
-                "cohens_kappa": round(sarc_kappa, 4),
-            },
-            "subjectivity_attribute": {
-                "percent_agreement": round(subj_po, 2),
-                "cohens_kappa": round(subj_kappa, 4),
-            },
-        },
-        "class_balance": dict(Counter([r["category"] for r in final_1000])),
-        "sarcasm_distribution": dict(Counter([r["is_sarcastic"] for r in final_1000])),
-        "subjectivity_distribution": dict(Counter([r["subjectivity"] for r in final_1000])),
+        "adjudicated_records": sum(1 for g in final if g["adjudicated"] == "Yes"),
+        "class_balance": dict(Counter(g["category"] for g in final)),
+        "subjectivity_distribution": dict(Counter(g["subjectivity"] for g in final)),
+        "polarity_distribution": dict(Counter(g["polarity"] for g in final)),
+        "sarcasm_distribution": dict(Counter(g["is_sarcastic"] for g in final)),
     }
+    save_report(report)
 
-    DATA_ANNOTATION.mkdir(parents=True, exist_ok=True)
-    report_file = DATA_ANNOTATION / "agreement_report.json"
-    with open(report_file, "w", encoding="utf-8") as f:
-        json.dump(report, f, indent=2, ensure_ascii=False)
-    print(f"[SAVED] Agreement report -> {report_file}")
-
-    # 4. Export to genuine legacy data/eval.xls
-    export_genuine_legacy_xls(final_1000, EVAL_XLS_PATH)
-
-    # 5. Verification: Load with pandas to guarantee zero corruption
     df_check = pd.read_excel(EVAL_XLS_PATH)
-    print(f"\n[VERIFIED] Successfully verified {EVAL_XLS_PATH.name} with pandas:")
-    print(f"  - Row count: {len(df_check):,} rows")
-    print(f"  - Columns:   {list(df_check.columns)}")
-    print(f"  - Class Balance:\n{df_check['category'].value_counts().to_string()}\n")
-
-    print("=" * 80)
-    print("OFFICIAL INTER-ANNOTATOR AGREEMENT FOR QUESTION 4")
-    print("=" * 80)
-    print(f"Primary Category Percent Agreement: {cat_po:.2f}% (Threshold: >= 80%) -> {'PASS' if cat_po >= 80.0 else 'FAIL'}")
-    print(f"Primary Category Cohen's Kappa:      {cat_kappa:.4f}")
-    print(f"Sarcasm Attribute Agreement:        {sarc_po:.2f}% (Kappa: {sarc_kappa:.4f})")
-    print(f"Subjectivity Attribute Agreement:   {subj_po:.2f}% (Kappa: {subj_kappa:.4f})")
-    print("=" * 80)
+    print(f"[VERIFIED] {EVAL_XLS_PATH.name}: {len(df_check)} rows, columns {list(df_check.columns)}")
+    print(df_check["label"].value_counts().to_string())
 
 
 if __name__ == "__main__":
-    run_agreement_and_export()
+    mode = sys.argv[1] if len(sys.argv) > 1 else "main"
+    {"pilot": run_pilot, "main": run_main, "finalize": run_finalize}[mode]()
