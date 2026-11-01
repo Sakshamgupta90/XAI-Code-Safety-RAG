@@ -178,7 +178,8 @@ class DualChannelRetriever:
 
         results = []
         for rank, idx in enumerate(top_indices, 1):
-            results.append((doc_ids[idx], float(scores[idx]), rank))
+            if scores[idx] > 0.0:
+                results.append((doc_ids[idx], float(scores[idx]), rank))
         return results
 
     def _retrieve_dense(self, query: str, channel: str, top_n: int) -> List[Tuple[str, float, int]]:
@@ -319,7 +320,8 @@ class DualChannelRetriever:
         index = self.policy_faiss if channel == "policy" else self.precedent_faiss
         id_map = self.policy_ids if channel == "policy" else self.precedent_ids
         bm25_model = self.policy_bm25 if channel == "policy" else self.precedent_bm25
-        doc_ids = self.policy_ids if channel == "policy" else self.precedent_ids
+        # BM25 scores follow the corpus order the index was built with (= docs_map insertion order)
+        doc_ids = list(docs_map.keys())
 
         candidate_n = max(config.top_k, config.candidate_pool_size)
 
@@ -346,8 +348,8 @@ class DualChannelRetriever:
             # BM25 hits for this query
             bm25_results = []
             if config.use_bm25 and bm25_model is not None and len(doc_ids) > 0:
-                tokens = q_text.lower().split()
-                scores = bm25_model.get_scores(tokens)
+                tokens = tokenize_for_bm25(q_text)
+                scores = bm25_model.get_scores(tokens) if tokens else np.zeros(len(doc_ids))
                 top_indices = np.argsort(scores)[::-1][:candidate_n]
                 for rank, idx in enumerate(top_indices, 1):
                     if scores[idx] > 0.0:
@@ -361,14 +363,19 @@ class DualChannelRetriever:
                 for doc_id, _, rank in dense_results:
                     rrf_scores[doc_id] = rrf_scores.get(doc_id, 0.0) + (1.0 / (config.rrf_k + rank))
                 sorted_rrf = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
-                ranked_candidates = sorted_rrf[:config.top_k]
+                ranked_candidates = sorted_rrf[:candidate_n]
             elif config.use_dense:
-                ranked_candidates = [(doc_id, score) for doc_id, score, _ in dense_results[:config.top_k]]
+                ranked_candidates = [(doc_id, score) for doc_id, score, _ in dense_results[:candidate_n]]
             else:
-                ranked_candidates = [(doc_id, score) for doc_id, score, _ in bm25_results[:config.top_k]]
+                ranked_candidates = [(doc_id, score) for doc_id, score, _ in bm25_results[:candidate_n]]
+
+            if config.use_rerank and ranked_candidates:
+                valid = [d for d, _ in ranked_candidates if d in docs_map]
+                rerank_scores = self._get_reranker().predict([[q_text, docs_map[d]["text"]] for d in valid])
+                ranked_candidates = sorted(zip(valid, [float(x) for x in rerank_scores]), key=lambda x: x[1], reverse=True)
 
             top_results: List[SearchResult] = []
-            for rank, (doc_id, score) in enumerate(ranked_candidates, 1):
+            for rank, (doc_id, score) in enumerate(ranked_candidates[:config.top_k], 1):
                 doc = docs_map.get(doc_id)
                 if not doc:
                     continue

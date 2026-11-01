@@ -1,194 +1,87 @@
-# XAI-Guard: Explainable Retrieval-Augmented Safety Moderation
+# XAI-Guard: Explainable Retrieval-Augmented Content Moderation
 
-**Course**: NTU AI6127 — Deep Neural Networks for NLP (2026)  
-**Instructor**: Prof. Erik Cambria  
-**Topic Alignment**: [SenticNet: XAI for Online Safety](https://sentic.net/projects/#xai-for-online-safety)
+NTU AI6127 Deep Neural Networks for NLP (2026), group assignment.
 
----
-
-## 1. System Architecture Overview
-
-Commercial content moderation models return an opaque float between 0.0 and 1.0 with zero justification or legal grounding. **XAI-Guard** conditions every safety decision on two distinct retrieval channels:
-1. **Channel A (Policy Rules)**: Codified statutory and platform clauses from Reddit Rule 1, Meta Hate Speech Policies, X Hateful Conduct / Violent Speech, and Singapore IMDA's Code of Practice for Online Safety (17 structural clauses).
-2. **Channel B (Precedent Cases)**: 17,305 human-annotated social media passages from HateXplain with annotated rationales, targets, and majority labels.
-
-The system decomposes decision-making using **Suitcase Chain-of-Thought** (Subjectivity $\rightarrow$ Sarcasm $\rightarrow$ Policy Violation), injects **SenticNet 7** affective primitives (Hourglass of Emotions: Pleasantness, Attention, Sensitivity, Aptitude), and verifies every claim through a **Dual-Gate Safety Critic**. When evidence is contradictory or insufficient, the system abstains and flags the post as `"Needs Human Review"`.
+XAI-Guard moderates a social-media post and explains its decision. It retrieves
+**(A)** the platform or statutory policy clauses that apply (Meta, X, Reddit, YouTube, Singapore IMDA) and
+**(B)** the most similar human-labelled posts (HateXplain). An open-weight LLM (Qwen3-30B-A3B-Instruct) then decides
+**Safe / Hate Speech / Harassment-Offensive**, along with subjectivity, polarity and sarcasm, cites its evidence, and suggests a
+respectful rewrite. A DeBERTa-NLI critic checks that the verdict is supported by the evidence. When it is not, the post goes
+to **human review** instead of receiving an unsupported verdict.
 
 ```
-               [ User Input Post ]
-                       │
-             [ Microtext Normalization ]
-             (slang, leetspeak, emojis)
-                       │
-          ┌────────────┴────────────┐
-          ▼                         ▼
-   [ Channel A Search ]      [ Channel B Search ]
-   (Statutory Policies)      (17k Precedents)
-          │                         │
-          └────────────┬────────────┘
-                       │
-          [ SenticNet 7 Affective Primitives ]
-          (Polarity, Pleasantness, Rage, Fear)
-                       │
-          [ Suitcase Reasoner & LLM Judge ]
-          (Subjectivity -> Sarcasm -> Policy)
-                       │
-            [ Dual-Gate Safety Critic ]
-         (Gate 1: Citation | Gate 2: Entailment)
-                       │
-             ┌─────────┴─────────┐
-             ▼                   ▼
-    [ Supported Verdict ]   [ Abstain / Human Review ]
+post ─► microtext normalisation ─► SenticNet 9 features
+          │
+          ├─► HyDE policy query (LLM) ─► Channel A: BM25 + BGE/FAISS ─► RRF ─► cross-encoder ─► top-3 clauses
+          └─► Channel B: BM25 + BGE/FAISS ─► RRF ─────────────────────────────────────────► top-5 precedents
+                                    │
+                LLM judge (suitcase CoT: subjectivity → polarity → sarcasm → target → policy) ─► JSON verdict
+                                    │
+     critic: citation check + DeBERTa NLI (claim ⊨ post, clause ⊨ category) + precedent consensus
+                                    │
+                    verdict + citations + highlighted triggers   |   "Needs Human Review"
 ```
 
----
-
-## 2. Directory Structure
-
-```
-xai_online_safety_rag/
-├── app.py                         # Question 2: Interactive Streamlit UI Cockpit
-├── requirements.txt               # Pinned dependencies
-├── README.md                      # Comprehensive execution & reproduction guide
-├── data/
-│   ├── eval.xls                   # Question 4: 1,000-record held-out gold evaluation set
-│   ├── raw/                       # Raw downloads (HateXplain, Davidson Twitter)
-│   ├── processed/
-│   │   ├── corpus_stats.json      # Question 1: Knowledge Base verification (17,322 docs)
-│   │   ├── policy_chunks.jsonl    # Channel A: 17 statutory policy clauses
-│   │   ├── precedent_docs.jsonl   # Channel B: 17,305 HateXplain precedents
-│   │   ├── hatexplain_test.jsonl  # Zero-leakage held-out test split (1,924 posts)
-│   │   └── qrels_policy.json      # 75-query IR benchmark with graded relevance
-│   └── annotation/
-│       └── agreement_report.json  # 92.1% dual-annotation agreement report
-├── indexes/                       # Serialized BM25 and FAISS dense indexes
-│   ├── policy_bm25.pkl
-│   ├── policy_faiss.bin
-│   ├── precedent_bm25.pkl
-│   ├── precedent_faiss.bin
-│   └── index_manifest.json
-├── models/
-│   └── g0_tfidf_lr.joblib         # Trained Question 4 baseline model
-├── results/
-│   ├── g0_baseline_metrics.json   # Baseline G0 performance metrics
-│   ├── question2_benchmarks.json  # 5 benchmark queries latency & telemetry
-│   ├── table1_retrieval_ablations.json # Question 3: Retrieval ablation study (R1-R6)
-│   ├── question4_downstream_metrics.json # Question 4: Downstream evaluation metrics
-│   └── table2_downstream_ablations.json  # Question 5: Downstream ablation study (G0-G6)
-└── src/
-    ├── normalize.py               # Microtext normalization & de-obfuscation
-    ├── data_prep.py               # Corpus chunking, statistics & train/val/test splits
-    ├── build_eval_pool.py         # Held-out evaluation pool filtering (zero leakage)
-    ├── agreement.py               # Dual-annotation Cohen's Kappa & eval.xls export
-    ├── build_indexes.py           # BM25 and FAISS dense index builder
-    ├── train_baseline.py          # Classical baseline G0 trainer & evaluator
-    ├── retriever.py               # Unified DualChannelRetriever (BM25 + FAISS + RRF)
-    ├── sentic.py                  # SenticNet 7 concept & Hourglass feature extractor
-    ├── critic.py                  # Dual-gate verification & abstention engine
-    ├── generator.py               # ExplainableSafetyReasoner (Suitcase CoT)
-    ├── benchmark_queries.py       # 5 benchmark queries latency profiler
-    ├── evaluate_retrieval.py      # Question 3: Rank-aware IR evaluation (P@K, MRR, NDCG)
-    ├── evaluate_downstream.py     # Question 4: Downstream test suite on eval.xls
-    └── run_ablation.py            # Question 5: Downstream ablation study
-```
-
----
-
-## 3. Environment Installation
-
-Ensure Python 3.11 is available.
+## 1. Setup
 
 ```bash
-# 1. Create and activate virtual environment
-python3.11 -m venv .venv
-source .venv/bin/activate
-
-# 2. Install dependencies
+python3.11 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
+python -m playwright install chromium      # only needed to re-collect the policy pages
+echo "NEBIUS_API_KEY=<your key>" > .env    # Nebius Token Factory (OpenAI-compatible); never commit this file
 ```
 
----
+Models are downloaded automatically on first use: `BAAI/bge-small-en-v1.5`, `cross-encoder/ms-marco-MiniLM-L-6-v2` and
+`MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli`. The LLMs are `Qwen/Qwen3-30B-A3B-Instruct-2507` (generator) and
+`Qwen/Qwen3-235B-A22B-Instruct-2507` (relevance assessor and RAGAS judge), both served by Nebius. Override them with
+`XAI_GENERATOR_MODEL` / `XAI_EVALUATOR_MODEL`. Every LLM response is cached in `results/cache/llm_cache.sqlite`, so
+re-running an evaluation reproduces the same outputs at no cost.
 
-## 4. Step-by-Step Reproduction Guide
+**SenticNet 9:** download `https://sentic.net/senticnet.zip` (non-commercial licence) and convert it with the snippet in
+`data/raw/senticnet/README.md`. The converted `senticnet9.tsv` is already included in the data zip.
 
-### Question 1: Knowledge Base Construction & Corpus Statistics
-Builds the dual-channel Knowledge Base (statutory policy clauses + 17k precedents) and verifies corpus scale:
-```bash
-python src/data_prep.py
-```
-*Outputs*: `data/processed/corpus_stats.json`
-- **Total Documents**: 17,322 (mandate $\ge 10,000$)
-- **Total Word Count**: 407,736 words (mandate $\ge 100,000$)
-- **Unique Vocab Types**: 25,973
+## 2. Build order
 
-### Question 4 Dataset: Held-Out `eval.xls` & Dual-Annotation
-Extracts external posts, screens against the Knowledge Base (zero data leakage), computes inter-annotator agreement, and exports legacy `eval.xls`:
-```bash
-python src/build_eval_pool.py
-python src/agreement.py
-```
-*Outputs*: `data/eval.xls` (1,000 records), `data/annotation/agreement_report.json`
-- **Primary Category Agreement**: 92.10% (Cohen's Kappa = 0.8815)
-- **Sarcasm Attribute Agreement**: 95.80% (Cohen's Kappa = 0.8202)
-- **Subjectivity Attribute Agreement**: 95.10% (Cohen's Kappa = 0.8674)
+| Step | Command | Output |
+|---|---|---|
+| 1 | `python src/collect_policies.py` | `data/raw/policies/*.md` (20 official pages, with URL and retrieval time), `provenance.json` |
+| 2 | `python src/data_prep.py` | `data/processed/policy_chunks.jsonl` (142 clauses), `precedent_docs.jsonl` (17,305), `hatexplain_test.jsonl`, `corpus_stats.json` |
+| 3 | `python src/build_indexes.py` | `indexes/` (BM25 pickles, BGE embeddings, FAISS) |
+| 4 | `python src/train_baseline.py` | `models/g0_tfidf_lr.joblib` |
+| 5 | `python src/build_eval_pool.py` | blank annotation workbooks in `data/annotation/sheets/` |
+| 6 | **Human annotation**, see `data/annotation/ANNOTATION_GUIDELINES.md` | completed workbooks |
+| 7 | `python src/agreement.py pilot` → `main` → (adjudicate `disagreements.xlsx`) → `finalize` | `data/eval.xls`, `agreement_report.json` |
+| 8 | `python src/build_qrels.py` (then `sheet` / `check` for the human verification) | `data/processed/qrels_policy.json` |
+| 9 | `python src/evaluate_retrieval.py` | `results/table1_retrieval_ablations.json` (Table 1) |
+| 10 | `python src/evaluate_downstream.py --dataset hatexplain_dev --calibrate` | `results/critic_thresholds.json` |
+| 11 | `python src/evaluate_downstream.py --dataset hatexplain_test` and `--dataset eval_xls` | `results/downstream_*.json`, `results/predictions/` (Table 2) |
+| 12 | `python src/evaluate_ragas.py --dataset hatexplain_test` and `--dataset eval_xls` | `results/ragas_*.json` |
+| 13 | `python src/benchmark_queries.py` | `results/question2_benchmarks.json` (5 queries and latency) |
+| 14 | `streamlit run app.py` | the UI |
 
-### Indexing & Baseline G0 Training
-Constructs BM25 and FAISS vector indexes (`BAAI/bge-small-en-v1.5`, 384-d) and trains G0:
-```bash
-python src/build_indexes.py
-python src/train_baseline.py
-```
-*Outputs*: `indexes/*.bin`, `indexes/*.pkl`, `models/g0_tfidf_lr.joblib`, `results/g0_baseline_metrics.json`
-- **G0 Macro-F1**: 0.4582 | Accuracy: 49.20%
+## 3. Code map
 
-### Question 2: Interactive Streamlit UI Cockpit & 5 Benchmark Queries
-Run the benchmark profiler:
-```bash
-python src/benchmark_queries.py
-```
-*Outputs*: `results/question2_benchmarks.json` (exact latencies in ms across 5 queries).
+| File | Role |
+|---|---|
+| `src/collect_policies.py` | Fetches the policy pages (Playwright for JavaScript pages, Trafilatura extraction, pypdf for IMDA) |
+| `src/data_prep.py` | HateXplain ingestion (majority label, rationales, targets), structure-aware policy chunking, corpus statistics |
+| `src/normalize.py` | Microtext normalisation (URLs, mentions, emoji, elongation, hashtags, slang, leetspeak) |
+| `src/build_indexes.py`, `src/retriever.py` | BM25, BGE + FAISS, RRF fusion, cross-encoder re-ranking, for both channels |
+| `src/llm.py` | Cached Nebius chat client, token usage and cost |
+| `src/generator.py` | HyDE, the suitcase prompt, the LLM judge, the end-to-end pipeline |
+| `src/sentic.py` | SenticNet 9 concept parsing and Hourglass features |
+| `src/critic.py` | Citation check, DeBERTa NLI gates, precedent consensus, abstention |
+| `src/build_eval_pool.py`, `src/agreement.py` | Annotation pool, sheets, Cohen's and Fleiss' kappa, adjudication, `eval.xls` |
+| `src/build_qrels.py`, `src/evaluate_retrieval.py` | Pooled graded qrels and Table 1 |
+| `src/eval_data.py`, `src/evaluate_downstream.py`, `src/evaluate_ragas.py` | Benchmarks, Table 2 ablation, RAGAS metrics |
+| `src/benchmark_queries.py`, `app.py` | Question 2 queries and the Streamlit UI |
 
-Launch the user interface:
-```bash
-streamlit run app.py
-```
-Open your browser at `http://localhost:8501`. Features include live latency telemetry, one-click benchmark query loading, policy clause cards with URL provenance, precedent cards with token highlights, and SenticNet emotion radar.
+## 4. Data formats
 
-### Question 3: Rank-Aware Retrieval Evaluation (Table 1)
-Evaluates 6 retrieval configurations on the 75-query QRELS benchmark:
-```bash
-python src/build_qrels.py
-python src/evaluate_retrieval.py
-```
-*Outputs*: `results/table1_retrieval_ablations.json`
-
-| Configuration | P@3 | R@3 | MRR | NDCG@3 | Latency (ms) |
-| :--- | :---: | :---: | :---: | :---: | :---: |
-| **R1: BM25 Only** | 0.3267 | 0.3117 | 0.5067 | 0.3150 | 3.6 |
-| **R2: Dense FAISS Only** | 0.4533 | 0.4367 | 0.6633 | 0.4718 | 64.0 |
-| **R3: Hybrid RRF** | 0.4133 | 0.3950 | 0.6667 | 0.4316 | 24.4 |
-| **R4: Hybrid + Cross-Encoder** | **0.4200** | **0.4033** | **0.6733** | **0.4369** | 997.7 |
-| **R5: Full System + HyDE** | 0.4067 | 0.3900 | 0.6400 | 0.4269 | 1020.5 |
-| **R6: R4 w/o Normalization** | 0.4200 | 0.4033 | 0.6733 | 0.4369 | 864.8 |
-
-### Question 4: Downstream Evaluation & Metrics
-Evaluates 1,000 instances on `data/eval.xls`, computing accuracy, selective/fallback F1, token rationale F1, and RAGAS metrics:
-```bash
-python src/evaluate_downstream.py
-```
-*Outputs*: `results/question4_downstream_metrics.json`
-
-### Question 5: Downstream Ablation Study (Table 2)
-Runs the full ablation matrix across G0–G6:
-```bash
-python src/run_ablation.py
-```
-*Outputs*: `results/table2_downstream_ablations.json`
-
----
-
-## 5. Key Empirical Highlights
-
-1. **Information Retrieval (Q3)**: Hybrid RRF combines lexical precision on slurs with dense semantic coverage for implicit hate, outperforming BM25 by **+32.9% MRR** ($0.5067 \rightarrow 0.6733$).
-2. **Selective Classification (Q4)**: The Dual-Gate Safety Critic provides an explicit abstention safety net, filtering ungrounded hallucinations to `"Needs Human Review"`.
-3. **Neurosymbolic Affect (Q5)**: SenticNet 7 affective primitives ground emotional intensity, preventing false positives on impassioned benign counter-speech.
+- `data/eval.xls` (legacy Excel, one row per post): `id, text, label, subjectivity, polarity, is_sarcastic,
+  annotator_1, annotator_2, adjudicated, group`. `label` ∈ {Safe, Hate Speech, Harassment-Offensive}.
+- `policy_chunks.jsonl`: `id, source, title, section, url, retrieved_on, text, word_count`.
+- `precedent_docs.jsonl`: `id, text, raw_text, tokens, rationales, category, targets, …`.
+- `qrels_policy.json`: per query `query_id, post_id, label, query_raw, judged, qrels{clause_id: 0|1|2}`.
+- `results/predictions/<dataset>/<config>.jsonl`: one JSON object per post with the verdict, citations, triggers,
+  explanation, critic decision and latency.

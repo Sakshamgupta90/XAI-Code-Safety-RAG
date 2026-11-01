@@ -1,22 +1,26 @@
 """
-app.py - XAI-Guard Streamlit Interactive Cockpit
+app.py - XAI-Guard Streamlit UI
 Course: NTU AI6127 (2026) — Question 2 Deliverable.
 
-An Explainable, Retrieval-Augmented Safety Moderation system conditioning decisions
-on statutory policy clauses (Reddit, Meta, X, Singapore IMDA) and historical precedents
-(HateXplain) with SenticNet affective primitives and live latency telemetry (ms).
+Paste a post and get an explainable moderation decision:
+- verdict (Safe / Hate Speech / Harassment-Offensive, or "Needs Human Review" when the critic abstains)
+- the policy clause it violates, with a link to the official source
+- the most similar human-labelled precedents (HateXplain) and their consensus
+- the trigger words highlighted in the post, subjectivity / polarity / sarcasm, SenticNet emotions
+- a respectful rewrite suggestion, the critic's checks, and per-stage latency
+
+Run: streamlit run app.py
 """
 
+import html
 import json
 import os
+import re
 import sys
-import time
 from pathlib import Path
 
-# Force stable threading on macOS
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
-os.environ["OMP_NUM_THREADS"] = "2"
 
 import streamlit as st
 
@@ -24,232 +28,133 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.normalize import normalize_text
-from src.retriever import DualChannelRetriever, RetrievalConfig
-from src.sentic import extract_sentic_features
+from src.generator import ExplainableSafetyReasoner, ModerationConfig
 
-# Set page configuration
-st.set_page_config(
-    page_title="XAI-Guard: Explainable Safety RAG",
-    page_icon="🛡️",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+st.set_page_config(page_title="XAI-Guard", page_icon="🛡️", layout="wide")
 
-# Benchmark queries for Question 2
 SAMPLE_QUERIES = {
-    "Select a benchmark query...": "",
-    "Q1: Explicit Hate / Xenophobia": "go back to your own country, nobody wants you here",
-    "Q2: Implicit Sarcasm / Stereotyping": "Oh wow, another DEI hire pretending to understand engineering, truly inspiring.",
-    "Q3: Benign Identity / Counter-speech": "I am proud to be a gay man and no one can take my dignity away.",
-    "Q4: Obfuscated Leetspeak Harassment": "u r so d*mb, go k1ll urself u worthless piece of tr@sh",
-    "Q5: Neutral Everyday Conversation": "Can someone recommend a good beginner tutorial for Python and machine learning?",
+    "— choose an example —": "",
+    "Q1 Explicit xenophobia": "go back to your own country, nobody wants you here",
+    "Q2 Sarcastic stereotyping": "Oh wow, another DEI hire pretending to understand engineering, truly inspiring.",
+    "Q3 Benign identity statement": "I am proud to be a gay man and no one can take my dignity away.",
+    "Q4 Obfuscated harassment": "u r so d*mb, go k1ll urself u worthless piece of tr@sh",
+    "Q5 Neutral question": "Can someone recommend a good beginner tutorial for Python and machine learning?",
 }
+VERDICT_COLOURS = {"Safe": "#1b7f3b", "Hate Speech": "#b3261e", "Harassment-Offensive": "#c26a00",
+                   "Needs Human Review": "#5b5b8f"}
 
 
-@st.cache_resource(show_spinner="Initializing DualChannelRetriever & SenticNet models...")
-def load_resources():
-    retriever = DualChannelRetriever()
-    cfg_policy = RetrievalConfig(top_k=3, use_bm25=True, use_dense=True, use_rrf=True, use_rerank=True)
-    cfg_prec = RetrievalConfig(top_k=5, use_bm25=True, use_dense=True, use_rrf=True, use_rerank=True)
-    return retriever, cfg_policy, cfg_prec
+@st.cache_resource(show_spinner="Loading retriever, re-ranker and NLI models…")
+def load_reasoner():
+    reasoner = ExplainableSafetyReasoner()
+    _ = reasoner.retriever
+    return reasoner
+
+
+@st.cache_data
+def load_policy_urls():
+    urls = {}
+    with open(PROJECT_ROOT / "data" / "processed" / "policy_chunks.jsonl", encoding="utf-8") as f:
+        for line in f:
+            d = json.loads(line)
+            urls[d["id"]] = (d["url"], d["title"])
+    return urls
 
 
 @st.cache_data
 def load_corpus_stats():
-    stats_file = PROJECT_ROOT / "data" / "processed" / "corpus_stats.json"
-    if stats_file.exists():
-        with open(stats_file, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {
-        "total_documents": 17322,
-        "total_words": 407736,
-        "unique_vocab_types": 25973
-    }
+    return json.loads((PROJECT_ROOT / "data" / "processed" / "corpus_stats.json").read_text())
+
+
+def highlight(text: str, triggers):
+    out = html.escape(text)
+    for t in sorted(set(triggers), key=len, reverse=True):
+        if t.strip():
+            out = re.sub(re.escape(html.escape(t)), lambda m: f"<mark>{m.group(0)}</mark>", out, flags=re.IGNORECASE)
+    return out
 
 
 def main():
-    retriever, cfg_policy, cfg_prec = load_resources()
     stats = load_corpus_stats()
-
-    # --- Sidebar ---
-    st.sidebar.image("https://img.icons8.com/color/96/000000/shield.png", width=70)
-    st.sidebar.title("XAI-Guard")
-    st.sidebar.caption("Explainable Safety Moderation RAG\nNTU AI6127 (2026)")
-    st.sidebar.markdown("---")
-
-    st.sidebar.subheader("📊 Knowledge Base Scale")
-    st.sidebar.metric("Total Passages", f"{stats['total_documents']:,}")
-    st.sidebar.metric("Total Word Count", f"{stats['total_words']:,}")
-    st.sidebar.metric("Unique Vocab Types", f"{stats['unique_vocab_types']:,}")
-    st.sidebar.markdown("---")
-
-    st.sidebar.subheader("⚙️ Retrieval Settings")
-    use_rerank = st.sidebar.checkbox("Enable Cross-Encoder Re-ranker", value=True)
-    top_k_prec = st.sidebar.slider("Channel B Precedents (K)", min_value=1, max_value=10, value=5)
-    cfg_prec.use_rerank = use_rerank
-    cfg_prec.top_k = top_k_prec
-
-    st.sidebar.markdown("---")
-    st.sidebar.info(
-        "**XAI-Guard** conditions all decisions on **Channel A** (Statutory & Platform Policy Rules) and "
-        "**Channel B** (17k Precedent Cases from HateXplain) with SenticNet 7 neurosymbolic primitives."
+    st.sidebar.title("🛡️ XAI-Guard")
+    st.sidebar.caption("Explainable retrieval-augmented content moderation · NTU AI6127")
+    st.sidebar.metric("Indexed chunks", f"{stats['total_chunks']:,}")
+    st.sidebar.caption(f"{stats['policy_clauses_count']} policy clauses from {stats['policy_pages_count']} official pages · "
+                       f"{stats['precedent_posts_count']:,} human-labelled precedents")
+    st.sidebar.subheader("Pipeline switches")
+    cfg = ModerationConfig(
+        use_hyde=st.sidebar.checkbox("HyDE policy query", value=True),
+        use_sentic=st.sidebar.checkbox("SenticNet features", value=True),
+        use_cot=st.sidebar.checkbox("Suitcase chain-of-thought", value=True),
+        use_critic=st.sidebar.checkbox("Grounding critic (may abstain)", value=True),
     )
 
-    # --- Main Header ---
-    st.title("🛡️ XAI-Guard: Explainable Safety Cockpit")
-    st.markdown(
-        "An explainable, neurosymbolic Retrieval-Augmented Generation system for content moderation. "
-        "Every moderation decision is grounded in codified policies and human-adjudicated precedents."
-    )
+    st.title("XAI-Guard: why is this post (not) allowed?")
+    choice = st.selectbox("Example posts", list(SAMPLE_QUERIES))
+    text = st.text_area("Post to moderate", value=SAMPLE_QUERIES[choice], height=90,
+                        placeholder="Paste a social-media post…")
+    if not st.button("Moderate", type="primary") or not text.strip():
+        return
 
-    # Benchmark query selector
-    col_bench, col_clear = st.columns([4, 1])
-    with col_bench:
-        selected_bench = st.selectbox(
-            "⚡ Quick-Load Benchmark Queries (Question 2):",
-            list(SAMPLE_QUERIES.keys()),
-            index=0
-        )
-    with col_clear:
-        st.write("")
-        st.write("")
-        if st.button("Reset Input"):
-            st.session_state["query_input"] = ""
+    reasoner = load_reasoner()
+    with st.spinner("Retrieving policies and precedents, asking the LLM judge, checking the evidence…"):
+        out = reasoner.reason(text, cfg)
 
-    default_text = SAMPLE_QUERIES[selected_bench] if selected_bench != "Select a benchmark query..." else ""
-    if "query_input" not in st.session_state or default_text:
-        st.session_state["query_input"] = default_text
+    final = out.final_verdict
+    colour = VERDICT_COLOURS.get(final, "#444")
+    st.markdown(f"<div style='padding:14px;border-radius:8px;background:{colour};color:white;font-size:1.4em'>"
+                f"<b>{final}</b>{'' if final == out.category else f' &nbsp;(LLM verdict: {out.category})'}</div>",
+                unsafe_allow_html=True)
+    if out.critic_decision["abstention_reason"]:
+        st.warning("Sent to human review — " + out.critic_decision["abstention_reason"])
 
-    user_text = st.text_area(
-        "Enter text to evaluate for safety violations:",
-        value=st.session_state["query_input"],
-        height=100,
-        placeholder="Type or paste social media text here..."
-    )
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Subjectivity", out.subjectivity)
+    c2.metric("Polarity", out.polarity)
+    c3.metric("Sarcastic", "Yes" if out.is_sarcastic else "No")
+    pc = out.precedent_consensus
+    c4.metric("Precedent agreement", f"{pc['confidence']:.0%}", help=f"Majority label of the 5 nearest precedents: {pc['label']}")
 
-    if st.button("🛡️ Run Safety Audit", type="primary", use_container_width=True):
-        if not user_text.strip():
-            st.warning("Please enter some text to inspect.")
-            return
+    st.markdown("**Post (trigger words highlighted)**")
+    st.markdown(f"<div style='font-size:1.1em'>{highlight(text, out.trigger_words)}</div>", unsafe_allow_html=True)
+    st.markdown(f"**Why:** {out.explanation}")
+    if out.violation_claim:
+        st.caption(f"Claim checked by the critic: {out.violation_claim}  ·  target: {out.target_group}")
+    if out.detox_rephrase and final != "Safe":
+        st.info(f"**Suggested rewrite:** {out.detox_rephrase}")
 
-        with st.spinner("Executing Microtext Normalization, Dual-Channel Hybrid Search, and SenticNet Analysis..."):
-            # 1. Normalization
-            t0 = time.perf_counter()
-            cleaned_text = normalize_text(user_text)
-            t_norm = (time.perf_counter() - t0) * 1000.0
+    left, right = st.columns(2)
+    urls = load_policy_urls()
+    with left:
+        st.subheader("Policy clauses (Channel A)")
+        for p in out.retrieved_policies:
+            url, title = urls.get(p["id"], ("", p["title_or_targets"]))
+            cited = " ✅ cited" if p["id"] == out.cited_clause else ""
+            with st.expander(f"{p['source']} — {p['category_or_section']}{cited}", expanded=bool(cited)):
+                st.write(" ".join(p["text"].split()[:180]) + " …")
+                st.caption(f"[{title}]({url}) · id `{p['id']}` · re-rank score {p['score']:.2f}")
+        if out.hyde_query:
+            st.caption(f"HyDE search query: {out.hyde_query}")
+    with right:
+        st.subheader("Similar labelled posts (Channel B)")
+        for p in out.retrieved_precedents:
+            cited = " ✅ cited" if p["id"] in out.cited_precedents else ""
+            targets = ", ".join(p["title_or_targets"]) if p["title_or_targets"] else "none"
+            st.markdown(f"**{p['category_or_section']}**{cited} · targets: {targets}  \n> {html.escape(p['text'][:220])}")
 
-            # 2. SenticNet Features
-            t0 = time.perf_counter()
-            sentic_prof = extract_sentic_features(cleaned_text)
-            t_sentic = (time.perf_counter() - t0) * 1000.0
-
-            # 3. Channel A: Policy Retrieval
-            t0 = time.perf_counter()
-            policy_hits = retriever.retrieve(cleaned_text, channel="policy", config=cfg_policy)
-            t_policy = (time.perf_counter() - t0) * 1000.0
-
-            # 4. Channel B: Precedent Retrieval
-            t0 = time.perf_counter()
-            prec_hits = retriever.retrieve(cleaned_text, channel="precedent", config=cfg_prec)
-            t_prec = (time.perf_counter() - t0) * 1000.0
-
-            total_ms = t_norm + t_sentic + t_policy + t_prec
-
-        # Compute Precedent Consensus
-        labels = [p.category_or_section for p in prec_hits if p.category_or_section]
-        counts = {}
-        for l in labels:
-            counts[l] = counts.get(l, 0) + 1
-        majority_label = max(counts, key=counts.get) if counts else "normal"
-        consensus_ratio = (counts.get(majority_label, 0) / len(labels)) if labels else 0.0
-
-        # Latency Telemetry Row
-        st.markdown("### ⏱️ Live Latency Telemetry")
-        m1, m2, m3, m4, m5 = st.columns(5)
-        m1.metric("Total Latency", f"{total_ms:.1f} ms")
-        m2.metric("Normalization", f"{t_norm:.2f} ms")
-        m3.metric("SenticNet 7", f"{t_sentic:.2f} ms")
-        m4.metric("Channel A (Policy)", f"{t_policy:.1f} ms")
-        m5.metric("Channel B (Precedent)", f"{t_prec:.1f} ms")
-
-        st.markdown("---")
-
-        # Top Verdict Row
-        v_col1, v_col2, v_col3 = st.columns([2, 2, 2])
-
-        with v_col1:
-            st.markdown("#### Primary Decision")
-            if majority_label == "hatespeech":
-                st.error("🚨 **HATE SPEECH DETECTED**")
-            elif majority_label in ["offensive", "harassment"]:
-                st.warning("⚠️ **OFFENSIVE / HARASSMENT**")
-            else:
-                st.success("✅ **SAFE / NORMAL CONTENT**")
-            st.caption(f"Normalized Input: *\"{cleaned_text}\"*")
-
-        with v_col2:
-            st.markdown("#### Evidence Consensus")
-            pct = int(consensus_ratio * 100)
-            st.progress(consensus_ratio)
-            st.write(f"**{pct}% Precedent Consensus** ({counts.get(majority_label, 0)} of {len(labels)} precedents agree)")
-            if consensus_ratio < 0.60:
-                st.info("⚠️ Low consensus — critic flags for human review.")
-
-        with v_col3:
-            st.markdown("#### Affective Polarity")
-            st.write(f"**Dominant Emotion:** {sentic_prof.dominant_emotion}")
-            st.write(f"**Polarity Score:** `{sentic_prof.polarity:.2f}` (Range: -1.0 to +1.0)")
-            if sentic_prof.matched_concepts:
-                st.write(f"**Trigger Concepts:** {', '.join(sentic_prof.matched_concepts)}")
-            else:
-                st.write("**Trigger Concepts:** None detected")
-
-        st.markdown("---")
-
-        # Evidence Tabs
-        tab_policy, tab_precedents, tab_sentic = st.tabs([
-            "📜 Channel A: Policy Grounding",
-            "👥 Channel B: Precedent Grounding",
-            "🧠 Neurosymbolic Affective Radar",
-        ])
-
-        with tab_policy:
-            st.markdown("#### Retrieved Statutory & Platform Policy Clauses")
-            st.write(
-                "These codified rules were retrieved from the Knowledge Base via hybrid BM25 + dense FAISS + re-ranking:"
-            )
-            for i, hit in enumerate(policy_hits, 1):
-                with st.expander(f"Clause {i}: [{hit.source.upper()}] {hit.category_or_section} (Relevance Score: {hit.score})", expanded=(i == 1)):
-                    st.markdown(f"**Clause Text:**\n> {hit.text}")
-                    st.markdown(f"**Identifier:** `{hit.id}` | **Length:** {hit.word_count} words")
-
-        with tab_precedents:
-            st.markdown(f"#### Retrieved Top-{len(prec_hits)} Human-Adjudicated Precedents (HateXplain)")
-            st.write(
-                "Similar real-world social media cases showing how human annotators adjudicated comparable posts:"
-            )
-            for i, hit in enumerate(prec_hits, 1):
-                lbl = hit.category_or_section.upper()
-                badge = "🔴 HATE" if "HATE" in lbl else ("🟡 OFFENSIVE" if "OFFENSIVE" in lbl else "🟢 NORMAL")
-                with st.container():
-                    st.markdown(f"**{i}. {badge}** (Match Score: `{hit.score}`) — Post ID: `{hit.id}`")
-                    st.markdown(f"> *\"{hit.text}\"*")
-                    st.caption(f"Annotated Targets: `{hit.title_or_targets}`")
-                    st.markdown("")
-
-        with tab_sentic:
-            st.markdown("#### SenticNet 7 Hourglass of Emotions")
-            st.write(
-                "Auxiliary neurosymbolic affective features decomposed into four affective dimensions:"
-            )
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Pleasantness (Attitude)", f"{sentic_prof.pleasantness:+.2f}")
-            c2.metric("Attention (Introspection)", f"{sentic_prof.attention:+.2f}")
-            c3.metric("Sensitivity (Fear)", f"{sentic_prof.sensitivity:+.2f}")
-            c4.metric("Aptitude (Temper/Rage)", f"{sentic_prof.aptitude:+.2f}")
-
-            st.markdown(f"**Affective Synthesis:** {sentic_prof.summary_text}")
+    with st.expander("SenticNet 9 emotions, reasoning steps, critic checks and latency"):
+        s = out.sentic_profile
+        e1, e2, e3, e4, e5 = st.columns(5)
+        e1.metric("Polarity", f"{s['polarity']:+.2f}")
+        e2.metric("Introspection", f"{s['introspection']:+.2f}")
+        e3.metric("Temper", f"{s['temper']:+.2f}")
+        e4.metric("Attitude", f"{s['attitude']:+.2f}")
+        e5.metric("Sensitivity", f"{s['sensitivity']:+.2f}")
+        st.caption(f"Dominant emotion: {s['dominant_emotion']} · concepts: {', '.join(s['matched_concepts']) or 'none'}")
+        if out.reasoning:
+            st.json(out.reasoning)
+        st.json(out.critic_decision)
+        st.json(out.latency_ms)
 
 
 if __name__ == "__main__":

@@ -32,6 +32,17 @@ GENERATOR_MODEL = os.environ.get("XAI_GENERATOR_MODEL", "Qwen/Qwen3-30B-A3B-Inst
 # Evaluator (RAGAS judge, relevance assessor): a different, larger model to avoid self-grading bias
 EVALUATOR_MODEL = os.environ.get("XAI_EVALUATOR_MODEL", "Qwen/Qwen3-235B-A22B-Instruct-2507")
 
+# USD per 1M tokens (input, output) on Nebius Token Factory, catalogue prices as of Oct 2026
+PRICES_PER_M = {
+    "Qwen/Qwen3-30B-A3B-Instruct-2507": (0.10, 0.30),
+    "Qwen/Qwen3-235B-A22B-Instruct-2507": (0.20, 0.60),
+}
+
+
+def usage_cost(model: str, prompt_tokens: int, completion_tokens: int) -> float:
+    p_in, p_out = PRICES_PER_M.get(model, (0.0, 0.0))
+    return (prompt_tokens * p_in + completion_tokens * p_out) / 1e6
+
 
 def _load_api_key() -> str:
     key = os.environ.get("NEBIUS_API_KEY")
@@ -56,6 +67,7 @@ class LLMClient:
         CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
         self._db = sqlite3.connect(str(CACHE_FILE), check_same_thread=False)
         self._db.execute("CREATE TABLE IF NOT EXISTS cache (k TEXT PRIMARY KEY, v TEXT)")
+        self.read_cache = True  # set False to force fresh API calls (latency benchmarks); results are still cached
         self.usage = {"calls": 0, "cached": 0, "prompt_tokens": 0, "completion_tokens": 0, "seconds": 0.0}
 
     def _cache_key(self, payload: Dict[str, Any]) -> str:
@@ -78,11 +90,14 @@ class LLMClient:
         key = self._cache_key(payload)
 
         with self._lock:
-            row = self._db.execute("SELECT v FROM cache WHERE k=?", (key,)).fetchone()
+            row = self._db.execute("SELECT v FROM cache WHERE k=?", (key,)).fetchone() if self.read_cache else None
         if row:
+            cached = json.loads(row[0])
             with self._lock:
                 self.usage["cached"] += 1
-            return json.loads(row[0])["content"]
+                self.usage["cached_prompt_tokens"] = self.usage.get("cached_prompt_tokens", 0) + cached.get("usage", {}).get("prompt_tokens", 0)
+                self.usage["cached_completion_tokens"] = self.usage.get("cached_completion_tokens", 0) + cached.get("usage", {}).get("completion_tokens", 0)
+            return cached["content"]
 
         if self._key is None:
             self._key = _load_api_key()

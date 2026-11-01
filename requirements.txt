@@ -1,24 +1,29 @@
-# Core NLP & Normalization
+# Tested with Python 3.11 (macOS, CPU only)
+
+# Core NLP & normalisation
 emoji>=2.10.0
 
-# Data Engineering & Storage
+# Data collection & storage
 pandas>=2.0.0
-xlwt>=1.3.0
-openpyxl>=3.1.0
+xlwt>=1.3.0          # writes the legacy eval.xls required by the brief
+xlrd>=2.0.1          # reads eval.xls
+openpyxl>=3.1.0      # annotation workbooks
 requests>=2.31.0
-trafilatura>=1.6.0
-tqdm>=4.66.0
+trafilatura>=1.6.0   # main-content extraction from policy pages
+playwright>=1.40.0   # renders JavaScript policy pages (then: python -m playwright install chromium)
+pypdf>=4.0.0         # IMDA Code of Practice (PDF)
 
-# Information Retrieval & Indexing
+# Retrieval
 rank-bm25>=0.2.2
 faiss-cpu>=1.7.4
-sentence-transformers>=2.3.0
+numpy<2
 torch>=2.0.0
+sentence-transformers>=2.3.0
+transformers>=4.40.0   # DeBERTa-v3 NLI critic
 
-# Classical Baseline & Metrics
+# Baseline & metrics
 scikit-learn>=1.3.0
 joblib>=1.3.0
-ranx>=0.3.0
 
 # UI
 streamlit>=1.30.0
