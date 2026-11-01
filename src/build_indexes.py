@@ -10,6 +10,7 @@ dense vector encoding (Torch) and index creation (FAISS) are strictly decoupled:
 2. FAISS is imported afterwards to load the embeddings and build IndexFlatIP stores (.bin).
 """
 
+import hashlib
 import json
 import os
 import pickle
@@ -95,13 +96,28 @@ def encode_dense_embeddings(
     Generates L2-normalized dense embeddings in stable batches and saves as NumPy arrays.
     Does not import or touch FAISS to keep PyTorch runtime completely isolated.
     """
-    if output_npy.exists() and ids_npy.exists():
-        print(f"[CACHE] Found {output_npy.name}, skipping dense encoding.")
-        return np.load(output_npy)
-
-    print(f"\nEncoding {channel_name} ({len(documents):,} docs) with {MODEL_NAME} ...")
     texts = [doc["text"][:512] for doc in documents]
     doc_ids = [doc["id"] for doc in documents]
+    hashes = [hashlib.sha1(t.encode("utf-8")).hexdigest() for t in texts]
+    hash_file = output_npy.with_suffix(".sha1.json")
+
+    # Incremental cache: re-encode only passages whose text changed since the embeddings were computed
+    if output_npy.exists() and ids_npy.exists() and hash_file.exists() \
+            and list(np.load(ids_npy, allow_pickle=True)) == doc_ids:
+        embeddings = np.load(output_npy)
+        old = json.loads(hash_file.read_text())
+        changed = [i for i, (h_old, h_new) in enumerate(zip(old, hashes)) if h_old != h_new]
+        if changed:
+            print(f"[CACHE] {output_npy.name}: re-encoding {len(changed)} changed passages")
+            embeddings[changed] = model.encode([texts[i] for i in changed], normalize_embeddings=True,
+                                               convert_to_numpy=True).astype("float32")
+            np.save(output_npy, embeddings)
+            hash_file.write_text(json.dumps(hashes))
+        else:
+            print(f"[CACHE] Found {output_npy.name}, all {len(texts):,} passages unchanged.")
+        return embeddings
+
+    print(f"\nEncoding {channel_name} ({len(documents):,} docs) with {MODEL_NAME} ...")
 
     start_time = time.time()
     embeddings_list = []
@@ -127,6 +143,7 @@ def encode_dense_embeddings(
 
     np.save(output_npy, all_embeddings)
     np.save(ids_npy, np.array(doc_ids))
+    hash_file.write_text(json.dumps(hashes))
     print(f"[SAVED] {channel_name} Embeddings -> {output_npy} (Shape: {all_embeddings.shape})")
     print(f"[SAVED] {channel_name} ID Map     -> {ids_npy}")
     return all_embeddings

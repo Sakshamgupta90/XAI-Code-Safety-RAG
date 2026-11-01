@@ -9,7 +9,7 @@ Applies consistent preprocessing to:
 4. Character Elongation: Capped at 2 repetitions (e.g., 'sooooo' -> 'soo')
 5. Hashtag Segmentation: Splits camelCase or underscored hashtags (e.g., '#SendThemBack' -> 'send them back')
 6. Slang & Abbreviations: Dictionary expansion (e.g., 'smh' -> 'shaking my head')
-7. Leetspeak / Obfuscation: De-obfuscates evasion tricks (e.g., 'k1ll' -> 'kill', 'f*ck' -> 'fuck')
+7. Leetspeak / Obfuscation: De-obfuscates evasion tricks (e.g., k1ll -> kill, f*ck -> fuck, tr@sh -> trash)
 
 CRITICAL RULE:
 Slurs and explicit offensive terms are deliberately PRESERVED because they represent
@@ -49,6 +49,7 @@ SLANG_DICT: Dict[str, str] = {
     "plz": "please",
     "thx": "thanks",
     "ur": "your",
+    "urself": "yourself",
     "u": "you",
     "r": "are",
 }
@@ -73,13 +74,19 @@ OBFUSCATION_PATTERNS: List[Tuple[re.Pattern, str]] = [
     (re.compile(r"\bn\*gg[a-z]*\b", re.IGNORECASE), "nigger"),
     (re.compile(r"\bf\*g\b", re.IGNORECASE), "fag"),
     (re.compile(r"\br\*tard\b", re.IGNORECASE), "retard"),
+    (re.compile(r"\bd\*mb\b", re.IGNORECASE), "dumb"),
+    (re.compile(r"\bst\*pid\b", re.IGNORECASE), "stupid"),
+    # Symbol-for-letter swaps inside a word: tr@sh -> trash, a$$ -> ass, h0e -> hoe
+    (re.compile(r"(?<=[a-z])@(?=[a-z])", re.IGNORECASE), "a"),
+    (re.compile(r"(?<=[a-z])\$(?=[a-z$])|(?<=\$)\$", re.IGNORECASE), "s"),
+    (re.compile(r"(?<=[a-z])0(?=[a-z])", re.IGNORECASE), "o"),
 ]
 
 # URL regex
 URL_PATTERN = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
 
 # User mention regex (handles @user, @username, and HateXplain's <user> token)
-USER_MENTION_PATTERN = re.compile(r"@[\w_]+|<user>", re.IGNORECASE)
+USER_MENTION_PATTERN = re.compile(r"(?:(?<=\bRT)|(?<!\w))@[\w_]+|<user>", re.IGNORECASE)
 
 # Repeated character regex: matches 3 or more repeated characters (e.g., 'sooooo' -> 'soo')
 ELONGATION_PATTERN = re.compile(r"(.)\1{2,}", re.IGNORECASE)
