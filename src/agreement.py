@@ -7,10 +7,14 @@ Reads the workbooks our annotators filled in (data/annotation/sheets/, written b
 src/build_eval_pool.py). Nothing here generates or guesses labels: if a sheet is missing or
 incomplete the script stops and says which rows still need labels.
 
-Usage:
+Usage (team workflow, several human annotators):
   python src/agreement.py pilot      # 50-post pilot, all 6 annotators: pairwise % agreement + Fleiss' kappa
   python src/agreement.py main       # per-pair and pooled % agreement + Cohen's kappa; writes disagreements.xlsx
   python src/agreement.py finalize   # merges adjudications, balances classes, exports legacy data/eval.xls
+
+Usage (workflow actually used: one human annotator + two LLM annotators, src/annotate_app.py + src/llm_annotate.py):
+  python src/agreement.py human           # human vs LLM agreement; writes review_sheet.xlsx (posts both LLMs dispute)
+  python src/agreement.py finalize_human  # applies the human's optional review, balances, exports data/eval.xls
 """
 
 import json
@@ -302,6 +306,119 @@ def run_finalize():
     print(df_check["label"].value_counts().to_string())
 
 
+# ---------------------------------------------------------------- one human + two LLM annotators
+LLM_SHEETS = {"deepseek": "llm_annotator_deepseek", "gemma": "llm_annotator_gemma"}
+REVIEW_FILE = DATA_ANNOTATION / "review_sheet.xlsx"
+
+
+def _load_human_and_llms():
+    human = load_sheet("human_annotator")
+    llms = {}
+    for name, stem in LLM_SHEETS.items():
+        df = pd.read_csv(SHEETS_DIR / f"{stem}.csv", keep_default_na=False, na_values=[""])
+        df["id"] = df["id"].astype(str)
+        for f in FIELDS:
+            df[f] = [_canonical(f, v) or "INVALID" for v in df[f]]
+        llms[name] = df[df["id"].isin(set(human["id"]))]
+    return human, llms
+
+
+def run_human():
+    human, llms = _load_human_and_llms()
+    merged = human[["id", "text"] + FIELDS]
+    for name, df in llms.items():
+        merged = merged.merge(df[["id"] + FIELDS].rename(columns={f: f"{f}_{name}" for f in FIELDS}), on="id")
+    n = len(merged)
+    report_fields = {}
+    for f in FIELDS:
+        h, a, b = merged[f].tolist(), merged[f"{f}_deepseek"].tolist(), merged[f"{f}_gemma"].tolist()
+        report_fields[f] = {
+            "human_vs_deepseek": {"percent_agreement": round(calculate_percent_agreement(h, a), 2), "cohens_kappa": round(calculate_cohens_kappa(h, a), 4)},
+            "human_vs_gemma": {"percent_agreement": round(calculate_percent_agreement(h, b), 2), "cohens_kappa": round(calculate_cohens_kappa(h, b), 4)},
+            "deepseek_vs_gemma": {"percent_agreement": round(calculate_percent_agreement(a, b), 2), "cohens_kappa": round(calculate_cohens_kappa(a, b), 4)},
+            "fleiss_kappa_all_three": round(calculate_fleiss_kappa([[x, y, z] for x, y, z in zip(h, a, b)]), 4),
+            "majority_agreement_with_human": round(100 * sum(1 for x, y, z in zip(h, a, b) if (y == x or z == x)) / n, 2),
+        }
+    disputed = merged[(merged["category_deepseek"] != merged["category"]) & (merged["category_gemma"] != merged["category"])]
+    if not REVIEW_FILE.exists():
+        review = disputed[["id", "text", "category", "category_deepseek", "category_gemma"]].copy()
+        review["final_category"] = review["category"]
+        review.to_excel(REVIEW_FILE, index=False)
+        print(f"[SAVED] {len(review)} posts where both LLMs disagree with you -> {REVIEW_FILE} "
+              "(optional: re-read them and edit final_category only where you made a mistake)")
+    report = load_report()
+    report["single_human_round"] = {"annotators": {"annotator_1": "human (group member)", "annotator_2": "DeepSeek-V4.1-Flash",
+                                                   "annotator_3": "Gemma-3-27B-it"},
+                                    "posts": n, "fields": report_fields, "posts_disputed_by_both_llms": len(disputed)}
+    save_report(report)
+    for f in FIELDS:
+        r = report_fields[f]
+        print(f"  {f:<13} human-DeepSeek {r['human_vs_deepseek']['percent_agreement']:.1f}% (k {r['human_vs_deepseek']['cohens_kappa']:.2f}) | "
+              f"human-Gemma {r['human_vs_gemma']['percent_agreement']:.1f}% (k {r['human_vs_gemma']['cohens_kappa']:.2f}) | "
+              f"Fleiss {r['fleiss_kappa_all_three']:.2f}")
+
+
+def run_finalize_human():
+    human, llms = _load_human_and_llms()
+    changes = {}
+    if REVIEW_FILE.exists():
+        rv = pd.read_excel(REVIEW_FILE, keep_default_na=False, na_values=[""])
+        for _, r in rv.iterrows():
+            final = _canonical("category", r["final_category"])
+            if final and final != r["category"]:
+                changes[str(r["id"])] = final
+    gold = []
+    for _, r in human.iterrows():
+        rec = {"id": r["id"], "text": r["text"], "annotator_1": r["category"],
+               "annotator_2": llms["deepseek"].set_index("id").loc[r["id"], "category"],
+               "annotator_3": llms["gemma"].set_index("id").loc[r["id"], "category"],
+               "reviewed": "changed" if r["id"] in changes else "No"}
+        for f in FIELDS:
+            rec[f] = r[f]
+        rec["category"] = changes.get(r["id"], r["category"])
+        gold.append(rec)
+    counts = Counter(g["category"] for g in gold)
+    short = {c: n - counts.get(c, 0) for c, n in TARGET_PER_CLASS.items() if counts.get(c, 0) < n}
+    if short:
+        raise ValueError(f"Keep labelling: still short of {short} for a balanced 1,000-post set (have {dict(counts)}).")
+    rng = random.Random(SEED)
+    final = []
+    for cat, n in TARGET_PER_CLASS.items():
+        pool = [g for g in gold if g["category"] == cat]
+        rng.shuffle(pool)
+        final.extend(pool[:n])
+    final.sort(key=lambda g: g["id"])
+    for g in final:
+        g["label"] = g["category"]
+    columns = ["id", "text", "label", "subjectivity", "polarity", "is_sarcastic",
+               "annotator_1", "annotator_2", "annotator_3", "reviewed"]
+    export_genuine_legacy_xls(final, EVAL_XLS_PATH, columns)
+    with open(DATA_ANNOTATION / "gold_all_annotated.jsonl", "w", encoding="utf-8") as f:
+        for g in gold:
+            f.write(json.dumps(g, ensure_ascii=False) + "\n")
+    h = [g["annotator_1"] for g in final]
+    report = load_report()
+    report["eval_xls"] = {
+        "total_records": len(final),
+        "labelled_by_human_total": len(gold),
+        "review_changes": len(changes),
+        "category_agreement_on_final_1000": {
+            "human_vs_deepseek": round(calculate_percent_agreement(h, [g["annotator_2"] for g in final]), 2),
+            "human_vs_gemma": round(calculate_percent_agreement(h, [g["annotator_3"] for g in final]), 2),
+            "fleiss_kappa": round(calculate_fleiss_kappa([[g["annotator_1"], g["annotator_2"], g["annotator_3"]] for g in final]), 4),
+        },
+        "class_balance": dict(Counter(g["label"] for g in final)),
+        "subjectivity_distribution": dict(Counter(g["subjectivity"] for g in final)),
+        "polarity_distribution": dict(Counter(g["polarity"] for g in final)),
+        "sarcasm_distribution": dict(Counter(g["is_sarcastic"] for g in final)),
+    }
+    save_report(report)
+    df_check = pd.read_excel(EVAL_XLS_PATH, keep_default_na=False)
+    print(f"[VERIFIED] {EVAL_XLS_PATH.name}: {len(df_check)} rows, columns {list(df_check.columns)}")
+    print(df_check["label"].value_counts().to_string())
+
+
 if __name__ == "__main__":
     mode = sys.argv[1] if len(sys.argv) > 1 else "main"
-    {"pilot": run_pilot, "main": run_main, "finalize": run_finalize}[mode]()
+    {"pilot": run_pilot, "main": run_main, "finalize": run_finalize,
+     "human": run_human, "finalize_human": run_finalize_human}[mode]()

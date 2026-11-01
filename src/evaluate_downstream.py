@@ -258,13 +258,18 @@ def main():
     usage_by_cfg: Dict[str, Dict[str, int]] = {}
     for name, cfg in LLM_CONFIGS.items():
         before = dict(client.usage)
+        t_run = time.perf_counter()
         outs = run_llm_config(name, cfg, records, evidence, reasoner)
+        wall_s = time.perf_counter() - t_run
         for r, o in zip(records, outs):
             o["_clean_text"] = normalize_text(r["text"])
         outputs_by_cfg[name] = outs
         pt = client.usage["prompt_tokens"] + client.usage.get("cached_prompt_tokens", 0) - before["prompt_tokens"] - before.get("cached_prompt_tokens", 0)
         ct = client.usage["completion_tokens"] + client.usage.get("cached_completion_tokens", 0) - before["completion_tokens"] - before.get("cached_completion_tokens", 0)
-        usage_by_cfg[name] = {"prompt_tokens": pt, "completion_tokens": ct}
+        usage_by_cfg[name] = {"prompt_tokens": pt, "completion_tokens": ct, "wall_s": round(wall_s, 1),
+                              "fresh_calls": client.usage["calls"] - before["calls"],
+                              # throughput with 8 parallel API requests; only meaningful when the calls were not cached
+                              "posts_per_s_8_parallel": round(len(records) / wall_s, 2)}
 
     if args.calibrate:
         calibrate(records, outputs_by_cfg)
