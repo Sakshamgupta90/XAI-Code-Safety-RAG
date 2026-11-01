@@ -61,11 +61,7 @@ def load_jsonl(file_path: Path) -> List[Dict[str, Any]]:
 
 
 def build_bm25_index(documents: List[Dict[str, Any]], output_path: Path, channel_name: str) -> BM25Okapi:
-    """Builds and serializes a BM25Okapi index."""
-    if output_path.exists():
-        print(f"[CACHE] Found {output_path.name}, skipping BM25 build.")
-        with open(output_path, "rb") as f:
-            return pickle.load(f)["bm25"]
+    """Builds and serializes a BM25Okapi index (always rebuilt: it takes seconds and must match the documents)."""
 
     print(f"\nBuilding BM25 index for {channel_name} ({len(documents):,} docs) ...")
     corpus_tokens = [tokenize_for_bm25(doc["text"]) for doc in documents]

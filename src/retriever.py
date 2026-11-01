@@ -142,6 +142,11 @@ class DualChannelRetriever:
             self.precedent_faiss = faiss.read_index(str(precedent_faiss_file))
             self.precedent_ids = np.load(precedent_ids_file, allow_pickle=True)
 
+        # The BM25 pickle (which also stores the documents) and the FAISS id map must describe the same corpus
+        for name, docs, ids in (("policy", self.policy_docs, self.policy_ids), ("precedent", self.precedent_docs, self.precedent_ids)):
+            if ids is not None and list(ids) != list(docs.keys()):
+                raise RuntimeError(f"{name} indexes are out of sync (BM25 vs FAISS ids) — rerun src/build_indexes.py")
+
     def _get_encoder(self) -> SentenceTransformer:
         """Lazily initializes the dense encoder."""
         if self.encoder is None:
