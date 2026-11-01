@@ -5,8 +5,8 @@ Course: NTU AI6127 (2026) — Question 1 Deliverables.
 
 Actions:
 1. Downloads HateXplain dataset and split divisions.
-2. Ingests Platform & Statutory Policies (Reddit, Meta, X, Singapore IMDA OSA) with full provenance.
-3. Performs Structure-Aware Chunking by Markdown section headings.
+2. Ingests the policy pages collected by src/collect_policies.py (Meta, X, Reddit, YouTube, Singapore IMDA).
+3. Performs structure-aware chunking: split by section heading, then pack paragraphs to ~200 words.
 4. Normalizes all text using src/normalize.py.
 5. Saves:
    - data/processed/policy_chunks.jsonl (Channel A Rulebook)
@@ -42,220 +42,6 @@ DATA_PROCESSED = PROJECT_ROOT / "data" / "processed"
 HATEXPLAIN_DATA_URL = "https://raw.githubusercontent.com/hate-alert/HateXplain/master/Data/dataset.json"
 HATEXPLAIN_SPLITS_URL = "https://raw.githubusercontent.com/hate-alert/HateXplain/master/Data/post_id_divisions.json"
 
-# Curated statutory and platform policies with explicit provenance
-# Chunked strictly by section headings (###) so every chunk is a self-contained, citable legal unit.
-POLICIES_SPEC = [
-    {
-        "source": "Reddit",
-        "title": "Reddit Content Policy",
-        "url": "https://www.redditinc.com/policies/content-policy",
-        "retrieved_on": "2026-10-19T00:00:00Z",
-        "sections": [
-            {
-                "section_id": "reddit_rule_1_harassment",
-                "heading": "Rule 1: Remember the Human - Protection Against Harassment and Hate",
-                "text": (
-                    "Remember the human. Reddit is a place for creating community and belonging, not for attacking "
-                    "marginalized or vulnerable groups of people. Everyone has a right to use Reddit free of harassment, "
-                    "bullying, and threats of violence. Communities and users that incite violence or that promote hate "
-                    "based on identity or vulnerability will be banned. Marginalized or vulnerable groups include, but are "
-                    "not limited to, groups based on their actual and perceived race, color, religion, national origin, "
-                    "ethnicity, immigration status, gender, gender identity, sexual orientation, pregnancy, or disability. "
-                    "These include characteristics that are protected by applicable law. While Reddit values free expression, "
-                    "hate speech and targeted identity attacks degrade community safety and will not be tolerated."
-                ),
-            },
-            {
-                "section_id": "reddit_rule_1_exceptions",
-                "heading": "Rule 1: Exceptions for Public Policy Debate and Criticism of Institutions",
-                "text": (
-                    "Rule 1 does not protect public institutions, governments, corporations, or public officials from "
-                    "intense criticism, vigorous debate, or harsh political opinions. Satire, comedic political commentary, "
-                    "and harsh criticism of ideas, organizations, religious doctrines, or political policies do not constitute "
-                    "hate speech or personal harassment, provided they do not cross into inciting violence or demeaning protected "
-                    "groups as human beings. Context matters in evaluating whether political speech is protected debate or targeted hate."
-                ),
-            },
-            {
-                "section_id": "reddit_rule_2_rules",
-                "heading": "Rule 2: Community Standards and Authentic Participation",
-                "text": (
-                    "Abide by community rules. Post authentic content into communities where you have a personal interest, "
-                    "and do not cheat or engage in content manipulation (including spamming, vote manipulation, ban evasion, "
-                    "or subscriber fraud) or otherwise interfere with or disrupt Reddit communities."
-                ),
-            },
-            {
-                "section_id": "reddit_rule_3_privacy",
-                "heading": "Rule 3: Privacy, Doxxing, and Personal Information",
-                "text": (
-                    "Respect the privacy of others. Instigating harassment, for example by revealing someone's personal or "
-                    "confidential information (doxxing), is strictly prohibited. Never post phone numbers, home addresses, "
-                    "private social media accounts of non-public figures, or employer details with the intent to direct targeted "
-                    "harassment. Posting or threatening to post non-consensual intimate imagery is strictly prohibited and results "
-                    "in immediate account termination."
-                ),
-            },
-            {
-                "section_id": "reddit_rule_4_minors",
-                "heading": "Rule 4: Child Safety and Protection of Minors",
-                "text": (
-                    "Do not post, share, or encourage the sharing of sexual, predatory, or abusive content involving minors. "
-                    "Any predatory behavior, sexualization, or bullying targeted at minors is immediately escalated to law enforcement "
-                    "and National Center for Missing and Exploited Children (NCMEC)."
-                ),
-            },
-            {
-                "section_id": "reddit_rule_8_enforcement",
-                "heading": "Rule 8: Enforcement and Moderation Actions",
-                "text": (
-                    "We have a variety of ways of enforcing our rules, including, but not limited to: asking you nicely to knock it off, "
-                    "asking you less nicely, temporary or permanent suspension of accounts, removal of privileges from or adding "
-                    "restrictions to accounts, adding quarantine status to communities, removal of content, and banning of communities."
-                ),
-            },
-        ],
-    },
-    {
-        "source": "Meta",
-        "title": "Meta Community Standards",
-        "url": "https://transparency.fb.com/policies/community-standards/",
-        "retrieved_on": "2026-10-19T00:00:00Z",
-        "sections": [
-            {
-                "section_id": "meta_hate_tier_1",
-                "heading": "Section 3.1: Hate Speech - Tier 1 Violent and Dehumanizing Attacks",
-                "text": (
-                    "Tier 1 attacks target a person or group based on protected characteristics (race, ethnicity, national origin, "
-                    "disability, religious affiliation, caste, sexual orientation, sex, gender identity, and serious disease) with: "
-                    "Any violent speech or incitement to violence. Dehumanizing speech, including comparisons to animals that are in "
-                    "culture perceived as physically or mentally inferior (e.g., comparing humans to apes, monkeys, insects, pests, "
-                    "vermin, cockroaches, or parasites). Comparisons to subhuman entities, demons, or disease vectors (e.g., calling "
-                    "a group a virus, cancer, or plague). Claims of filth, feces, sewage, or unhygienic nature. Mocking or celebrating "
-                    "hate crimes or genocide."
-                ),
-            },
-            {
-                "section_id": "meta_hate_tier_2",
-                "heading": "Section 3.2: Hate Speech - Tier 2 Statements of Contempt and Inferiority",
-                "text": (
-                    "Tier 2 attacks target protected groups with statements of inferiority or expressions of contempt, disgust, or dismissal. "
-                    "This includes: Statements claiming physical, mental, or moral deficiencies (e.g., asserting a race or gender is "
-                    "genetically inferior, cowardly, intellectually subhuman, or inherently dishonest). Expressions of disgust or revulsion "
-                    "(e.g., 'you disgust me', using vomit emojis directed at a group's identity). Calling for exclusion or segregation "
-                    "based on protected identity. Cursing or vulgar insults directed at an individual's protected characteristic."
-                ),
-            },
-            {
-                "section_id": "meta_hate_tier_3",
-                "heading": "Section 3.3: Hate Speech - Tier 3 Calls for Segregation and Exclusion",
-                "text": (
-                    "Tier 3 attacks include calls to segregate, exclude, or deny access based on protected characteristics. Examples include "
-                    "demanding that specific nationalities, religious groups, or immigrants 'go back where they came from', stating they "
-                    "should not be allowed in public places, neighborhoods, universities, or commercial establishments. Denying protected "
-                    "groups equal participation in civil life constitutes hateful exclusion."
-                ),
-            },
-            {
-                "section_id": "meta_bullying_section_4",
-                "heading": "Section 4.1: Bullying and Harassment - Degrading Attacks and Unwanted Contact",
-                "text": (
-                    "Bullying and harassment prevents people from feeling safe and respected. We remove content that targets private "
-                    "individuals with degrading remarks about physical appearance, intelligence, or hygiene. This includes mocking deceased "
-                    "family members, severe personal insults, sexualized harassment, unwanted repeated contact, and encouraging others to "
-                    "swarm, demean, or harass an individual. Sarcastic or passive-aggressive attacks designed to humiliate individuals "
-                    "in peer settings violate this standard."
-                ),
-            },
-            {
-                "section_id": "meta_violence_incitement",
-                "heading": "Section 1.1: Violence and Incitement",
-                "text": (
-                    "We remove content that incites, glorifies, facilitates, or threatens acts of real-world violence. This includes high-severity "
-                    "statements of intent to commit violence against an individual or group, statements advocating murder, assault, or arson, "
-                    "and providing instructions or tactical blueprints for causing physical harm to individuals or infrastructure."
-                ),
-            },
-        ],
-    },
-    {
-        "source": "X",
-        "title": "X Rules and Policies",
-        "url": "https://help.x.com/en/rules-and-policies/x-rules",
-        "retrieved_on": "2026-10-19T00:00:00Z",
-        "sections": [
-            {
-                "section_id": "x_hateful_conduct",
-                "heading": "Hateful Conduct Policy",
-                "text": (
-                    "You may not attack other people on the basis of race, ethnicity, national origin, caste, sexual orientation, "
-                    "gender, gender identity, religious affiliation, age, disability, or serious disease. We prohibit inciting violence, "
-                    "threatening harm, or harassing individuals based on protected categories. We do not tolerate using hateful imagery, "
-                    "slurs, tropes, or dehumanizing metaphors to promote hostility or incite violence against protected communities. "
-                    "Repeated use of slurs or derogatory epithets with intent to harass leads to permanent account suspension."
-                ),
-            },
-            {
-                "section_id": "x_abusive_behavior",
-                "heading": "Abusive Behavior and Targeted Harassment",
-                "text": (
-                    "You may not engage in targeted harassment of someone, or incite others to do so. This includes wishing physical harm "
-                    "upon someone, repeatedly sending unsolicited abusive mentions, encouraging self-harm, or engaging in mass pile-ons "
-                    "intended to intimidate, silence, or degrade another user."
-                ),
-            },
-            {
-                "section_id": "x_violent_speech",
-                "heading": "Violent Speech Policy",
-                "text": (
-                    "You may not threaten, incite, glorify, or express a desire for violence or harm. Violent speech includes clear statements "
-                    "threatening murder, sexual assault, torture, or bodily injury, as well as praising mass casualties, terrorist attacks, "
-                    "or historical genocides."
-                ),
-            },
-        ],
-    },
-    {
-        "source": "Singapore IMDA",
-        "title": "IMDA Code of Practice for Online Safety",
-        "url": "https://www.imda.gov.sg/regulations-and-licensing-listing/online-safety",
-        "retrieved_on": "2026-10-19T00:00:00Z",
-        "sections": [
-            {
-                "section_id": "imda_osa_cyberbullying",
-                "heading": "Section 2.1: Harmful Online Communications - Cyberbullying and Harassment",
-                "text": (
-                    "Under the Singapore Broadcasting Act and the Online Safety Act provisions, designated social media services must "
-                    "minimize the exposure of users in Singapore to harmful content. Cyberbullying content refers to communications that "
-                    "are intended to cause, or are likely to cause, severe distress, humiliation, or psychological harm to an individual. "
-                    "This encompasses targeted online denigration, malicious spreading of falsehoods to damage personal dignity, and "
-                    "persistent hostile harassment."
-                ),
-            },
-            {
-                "section_id": "imda_osa_racial_religious_harmony",
-                "heading": "Section 2.2: Protection of Racial and Religious Harmony",
-                "text": (
-                    "In Singapore's multi-racial and multi-religious society, content inciting hatred, ill-will, hostility, or enmity "
-                    "against racial or religious groups constitutes an egregious online safety violation. Social media platforms are required "
-                    "under statutory codes of practice to take rapid down-action against statements demeaning racial identities, religious "
-                    "beliefs, or encouraging communal conflict."
-                ),
-            },
-            {
-                "section_id": "imda_osa_child_safety",
-                "heading": "Section 3.1: Safety Measures for Children and Minors",
-                "text": (
-                    "Designated platforms must provide differentiated accounts and safety features for child users. Content that promotes "
-                    "suicide, self-harm, physical violence, or sexual abuse must be strictly filtered from minors' feeds. Transparent reporting "
-                    "mechanisms and rapid human review workflows must be provided for child safety alerts."
-                ),
-            },
-        ],
-    },
-]
-
-
 def download_file_with_retry(url: str, target_path: Path, max_retries: int = 3) -> bool:
     """Downloads a file over HTTP with retry logic."""
     target_path.parent.mkdir(parents=True, exist_ok=True)
@@ -276,53 +62,137 @@ def download_file_with_retry(url: str, target_path: Path, max_retries: int = 3) 
     return False
 
 
+# Lines that mark the end of the policy body (site footers, related links, feedback widgets)
+POLICY_FOOTER_MARKERS = (
+    "We have the same policies around the world",
+    "## >x< Platform", "## \\>x\\< Platform",
+    "Was this helpful", "Need more help", "Related articles", "Give feedback about this article",
+    "Read more about", "Other resources",
+)
+# Navigation / change-log lines that carry no policy content
+POLICY_NOISE = re.compile(
+    r"^(CHANGE LOG|Today|Policy details|User Experiences|Data|"
+    r"(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]* \d{1,2}, \d{4}|\*\*[A-Z][a-z]+ \d{4}\*\*)$"
+)
+CHUNK_TARGET_WORDS = 200
+CHUNK_MIN_WORDS = 30
+
+
+def parse_policy_markdown(path: Path) -> Tuple[Dict[str, str], List[Tuple[str, List[str]]]]:
+    """
+    Splits a collected policy file into (metadata, [(section heading, paragraphs)]).
+    Markdown headings and short title-like lines (e.g. 'Tier 1', 'Do not post:') open a new section.
+    """
+    lines = path.read_text(encoding="utf-8").splitlines()
+    meta: Dict[str, str] = {"title": lines[0].lstrip("# ").strip()}
+    body_start = 1
+    for i, line in enumerate(lines[1:6], 1):
+        m = re.match(r"^(Source|Source URL|Retrieved|Terms): (.*)$", line)
+        if m:
+            meta[m.group(1).lower().replace(" ", "_")] = m.group(2).strip()
+            body_start = i + 1
+
+    sections: List[Tuple[str, List[str]]] = []
+    heading, paras, buf = meta["title"], [], []
+
+    def flush_para():
+        if buf:
+            paras.append(" ".join(buf).strip())
+            buf.clear()
+
+    for raw in lines[body_start:]:
+        line = raw.strip()
+        if any(line.startswith(m) for m in POLICY_FOOTER_MARKERS):
+            break
+        if not line:
+            flush_para()
+            continue
+        if POLICY_NOISE.match(line):
+            continue
+        plain = re.sub(r"[*#>\\]", "", line).strip()
+        is_md_heading = line.startswith("#")
+        is_title_like = (
+            len(plain.split()) <= 8 and not re.search(r"[.;,]$", plain)
+            and plain[:1].isupper() and not line.startswith(("-", "*", "|"))
+        )
+        if is_md_heading or is_title_like:
+            flush_para()
+            if paras:
+                sections.append((heading, paras))
+                paras = []
+            if plain:
+                heading = plain
+            continue
+        buf.append(re.sub(r"\*\*|\\", "", line.lstrip("-* ").strip()) if line.startswith(("- ", "* ")) else re.sub(r"\*\*|\\", "", line))
+    flush_para()
+    if paras:
+        sections.append((heading, paras))
+    return meta, sections
+
+
+def chunk_policy_sections(sections: List[Tuple[str, List[str]]]) -> List[Tuple[str, str]]:
+    """
+    Packs paragraphs of each section into passages of about CHUNK_TARGET_WORDS words.
+    Sections shorter than CHUNK_MIN_WORDS are merged into the following section so that
+    every chunk is a self-contained, citable clause.
+    """
+    chunks: List[Tuple[str, str]] = []
+    carry_heading, carry_text = None, ""
+    for heading, paras in sections:
+        text = " ".join(paras)
+        if carry_text:
+            heading = f"{carry_heading} / {heading}"
+            paras = [carry_text] + paras
+            carry_heading, carry_text = None, ""
+        if len(" ".join(paras).split()) < CHUNK_MIN_WORDS:
+            carry_heading, carry_text = heading, " ".join(paras)
+            continue
+        current: List[str] = []
+        for para in paras:
+            current.append(para)
+            if len(" ".join(current).split()) >= CHUNK_TARGET_WORDS:
+                chunks.append((heading, " ".join(current)))
+                current = []
+        if current:
+            tail = " ".join(current)
+            if len(tail.split()) < CHUNK_MIN_WORDS and chunks and chunks[-1][0] == heading:
+                chunks[-1] = (heading, chunks[-1][1] + " " + tail)
+            else:
+                chunks.append((heading, tail))
+    if carry_text and chunks:
+        chunks[-1] = (chunks[-1][0], chunks[-1][1] + f" {carry_heading}: {carry_text}")
+    return chunks
+
+
 def build_policy_corpus() -> List[Dict[str, Any]]:
-    """Builds and chunks the statutory & platform policy corpus by markdown section headings."""
+    """
+    Chunks the collected policy pages (src/collect_policies.py) into citable clauses.
+    Structure-aware: split on section headings first, then pack paragraphs to ~200 words.
+    """
     print("\n--- Ingesting & Chunking Policy Corpus ---")
-    DATA_RAW_POLICIES = DATA_RAW / "policies"
-    DATA_RAW_POLICIES.mkdir(parents=True, exist_ok=True)
+    policy_dir = DATA_RAW / "policies"
+    files = sorted(policy_dir.glob("*.md"))
+    if not files:
+        raise FileNotFoundError(f"No policy files in {policy_dir}. Run src/collect_policies.py first.")
 
     policy_chunks = []
-    for policy in POLICIES_SPEC:
-        source = policy["source"]
-        title = policy["title"]
-        url = policy["url"]
-        retrieved_on = policy["retrieved_on"]
-
-        # Save raw markdown for documentation and reproducibility
-        raw_filename = f"{source.lower().replace(' ', '_')}_policy.md"
-        raw_filepath = DATA_RAW_POLICIES / raw_filename
-        with open(raw_filepath, "w", encoding="utf-8") as f:
-            f.write(f"# {title}\n")
-            f.write(f"Source URL: {url}\n")
-            f.write(f"Retrieved: {retrieved_on}\n\n")
-            for sec in policy["sections"]:
-                f.write(f"### {sec['heading']}\n")
-                f.write(f"{sec['text']}\n\n")
-
-        # Process each section heading as a discrete, citable chunk
-        for sec in policy["sections"]:
-            sec_id = sec["section_id"]
-            heading = sec["heading"]
-            raw_text = sec["text"]
-
-            # Normalize policy text
-            cleaned_text = normalize_text(raw_text)
-            words = len(cleaned_text.split())
-
-            chunk_obj = {
-                "id": sec_id,
-                "source": source,
-                "title": title,
+    for path in files:
+        meta, sections = parse_policy_markdown(path)
+        for idx, (heading, text) in enumerate(chunk_policy_sections(sections), 1):
+            cleaned_text = normalize_text(text)
+            policy_chunks.append({
+                "id": f"{path.stem}_{idx:03d}",
+                "source": meta.get("source", ""),
+                "title": meta["title"],
                 "section": heading,
-                "url": url,
-                "retrieved_on": retrieved_on,
-                "text": cleaned_text,
-                "word_count": words,
-            }
-            policy_chunks.append(chunk_obj)
+                "url": meta.get("source_url", ""),
+                "retrieved_on": meta.get("retrieved", ""),
+                "text": f"{heading}: {cleaned_text}",
+                "word_count": len(cleaned_text.split()),
+            })
 
-    print(f"[OK] Processed {len(policy_chunks)} structural policy clauses across 4 major sources.")
+    by_source = Counter(c["source"] for c in policy_chunks)
+    print(f"[OK] Processed {len(policy_chunks)} policy clauses from {len(files)} pages: {dict(by_source)}")
     return policy_chunks
 
 
@@ -442,14 +312,14 @@ def process_hatexplain_data() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]
             "word_count": len(cleaned_text.split()),
         }
 
-        label_distribution[mapped_label] += 1
-
         if post_id in precedent_ids:
+            label_distribution[mapped_label] += 1
             precedent_docs.append(doc_obj)
         elif post_id in test_ids:
             test_docs.append(doc_obj)
         else:
             # If not in split file, default to precedent
+            label_distribution[mapped_label] += 1
             precedent_docs.append(doc_obj)
 
     stats = {
@@ -463,7 +333,7 @@ def process_hatexplain_data() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]
     print(f"[OK] Precedents (Train + Val): {len(precedent_docs)}")
     print(f"[OK] Held-Out Test Set:        {len(test_docs)}")
     print(f"[OK] Discarded (No Majority): {dropped_no_majority}")
-    print(f"[OK] Category Distribution:   {dict(label_distribution)}")
+    print(f"[OK] Precedent Labels:        {dict(label_distribution)}")
 
     return precedent_docs, test_docs, stats
 
@@ -512,13 +382,15 @@ def run_data_preparation():
     # 3. Compute deterministic corpus statistics (Question 1)
     print("\n--- Computing Official Corpus Statistics (Question 1) ---")
     all_kb_texts = [p["text"] for p in policy_chunks] + [d["text"] for d in precedent_docs]
-    total_docs = len(all_kb_texts)
+    total_chunks = len(all_kb_texts)
+    total_docs = len({p["url"] for p in policy_chunks}) + len(precedent_docs)
     total_words = sum(len(t.split()) for t in all_kb_texts)
     unique_types = compute_vocabulary_types(all_kb_texts)
 
     corpus_stats = {
         "generated_on": datetime.now(timezone.utc).isoformat(),
-        "total_documents_and_chunks": total_docs,
+        "total_documents": total_docs,
+        "total_chunks": total_chunks,
         "total_word_count": total_words,
         "unique_vocabulary_types": unique_types,
         "policy_clauses_count": len(policy_chunks),
@@ -526,11 +398,10 @@ def run_data_preparation():
         "held_out_test_posts": len(test_docs),
         "dropped_no_majority_posts": hx_stats["dropped_no_majority"],
         "precedent_label_distribution": hx_stats["label_distribution"],
+        "policy_pages_count": len({p["url"] for p in policy_chunks}),
+        "policy_word_count": sum(len(p["text"].split()) for p in policy_chunks),
         "source_breakdown": {
-            "Reddit": sum(1 for p in policy_chunks if p["source"] == "Reddit"),
-            "Meta": sum(1 for p in policy_chunks if p["source"] == "Meta"),
-            "X": sum(1 for p in policy_chunks if p["source"] == "X"),
-            "Singapore IMDA": sum(1 for p in policy_chunks if p["source"] == "Singapore IMDA"),
+            **dict(Counter(p["source"] for p in policy_chunks)),
             "HateXplain": len(precedent_docs),
         },
         "assignment_minimum_compliance": {
@@ -552,7 +423,8 @@ def run_data_preparation():
     print("\n" + "=" * 80)
     print("OFFICIAL CORPUS STATISTICS FOR QUESTION 1 REPORT")
     print("=" * 80)
-    print(f"Total Documents / Chunks: {total_docs:,}  (Threshold: >= 10,000) -> {'PASS' if total_docs >= 10000 else 'FAIL'}")
+    print(f"Total Documents:          {total_docs:,}  (Threshold: >= 10,000) -> {'PASS' if total_docs >= 10000 else 'FAIL'}")
+    print(f"Total Chunks (indexed):   {total_chunks:,}")
     print(f"Total Word Count:         {total_words:,} (Threshold: >= 100,000) -> {'PASS' if total_words >= 100000 else 'FAIL'}")
     print(f"Unique Types (Vocab):     {unique_types:,}")
     print(f"Source Breakdown:")
