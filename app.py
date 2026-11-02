@@ -108,12 +108,10 @@ def main():
     if out.critic_decision["abstention_reason"]:
         st.warning("Sent to human review — " + out.critic_decision["abstention_reason"])
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Subjectivity", out.subjectivity)
-    c2.metric("Polarity", out.polarity)
-    c3.metric("Sarcastic", "Yes" if out.is_sarcastic else "No")
     pc = out.precedent_consensus
-    c4.metric("Precedent agreement", f"{pc['confidence']:.0%}", help=f"Majority label of the 5 nearest precedents: {pc['label']}")
+    st.markdown(f"**Subjectivity:** {out.subjectivity} &nbsp;·&nbsp; **Polarity:** {out.polarity} &nbsp;·&nbsp; "
+                f"**Sarcastic:** {'Yes' if out.is_sarcastic else 'No'} &nbsp;·&nbsp; **Precedents agreeing:** "
+                f"{pc['confidence']:.0%} say {pc['label']}")
 
     st.markdown("**Post (trigger words highlighted)**")
     st.markdown(f"<div style='font-size:1.1em'>{highlight(text, out.trigger_words)}</div>", unsafe_allow_html=True)
@@ -131,7 +129,7 @@ def main():
             url, title = urls.get(p["id"], ("", p["title_or_targets"]))
             cited = " ✅ cited" if p["id"] == out.cited_clause else ""
             with st.expander(f"{p['source']} — {p['category_or_section']}{cited}", expanded=bool(cited)):
-                st.write(" ".join(p["text"].split()[:180]) + " …")
+                st.write(" ".join(p["text"].split()[:110]) + " …")
                 st.caption(f"[{title}]({url}) · id `{p['id']}` · re-rank score {p['score']:.2f}")
         if out.hyde_query:
             st.caption(f"HyDE search query: {out.hyde_query}")
