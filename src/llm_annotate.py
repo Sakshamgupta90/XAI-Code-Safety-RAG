@@ -25,7 +25,7 @@ from src.llm import get_client, parallel_map
 POOL_FILE = PROJECT_ROOT / "data" / "raw" / "eval_pool" / "candidates.jsonl"
 SHEETS_DIR = PROJECT_ROOT / "data" / "annotation" / "sheets"
 GUIDELINES = PROJECT_ROOT / "data" / "annotation" / "ANNOTATION_GUIDELINES.md"
-ANNOTATORS = {"deepseek": "deepseek-ai/DeepSeek-V4.1-Flash", "gemma": "google/gemma-3-27b-it"}
+ANNOTATORS = {"deepseek": "deepseek-ai/DeepSeek-V4.1-Flash", "gemma": "google/gemma-3-27b-it", "gptoss": "openai/gpt-oss-120b"}
 
 PROMPT = """You are an annotator for a content-moderation dataset. Follow these guidelines exactly.
 
@@ -61,7 +61,11 @@ def annotate(name: str, model: str):
     print(f"Annotator {name} ({model}) on {len(posts)} posts")
 
     def one(p):
-        out = client.chat_json([{"role": "user", "content": PROMPT.format(guidelines=guide, post=p["text"])}], max_tokens=300)
+        msgs = [{"role": "user", "content": PROMPT.format(guidelines=guide, post=p["text"])}]
+        out = client.chat_json(msgs, max_tokens=300)
+        if not canonical("category", out.get("category")):
+            # reasoning models may spend the budget thinking before the JSON; retry once with a larger budget
+            out = client.chat_json(msgs, max_tokens=3000)
         row = {"id": p["id"], "text": p["text"]}
         for f in ("category", "subjectivity", "polarity", "is_sarcastic"):
             row[f] = canonical(f, out.get(f))

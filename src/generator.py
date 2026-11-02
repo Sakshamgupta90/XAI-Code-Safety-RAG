@@ -46,6 +46,13 @@ TASK_DEFINITIONS = """Categories (choose exactly one):
   person is Harassment-Offensive.
 - "Safe": neither; includes civil opinions, criticism of ideas or institutions, casual profanity not aimed at anyone,
   and slurs quoted to condemn them.
+Tie-breakers (same as the human annotation guidelines):
+  1. A slur quoted to condemn or report it, or reclaimed in-group use with no attack (e.g. "my nigga, love you bro"),
+     is NOT Hate Speech: Safe, or Harassment-Offensive if someone is insulted.
+  2. Criticism of a government, party, politician, ideology, organisation or of extremists (e.g. "white supremacists",
+     "Islamists") is not an attack on a protected group.
+  3. Merely mentioning a group, describing events or discussing racism/sexism is not Hate Speech.
+  4. When unsure between two labels, choose the less severe one.
 Subjectivity: "Objective" (reports facts, neutral question) or "Subjective" (opinion, emotion, judgement, insult).
 Polarity: "Positive" or "Negative" attitude of the author if Subjective; "None" if Objective.
 Sarcasm: true only if the literal meaning is the opposite of the intended meaning."""

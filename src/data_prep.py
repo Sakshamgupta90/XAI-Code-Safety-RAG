@@ -225,19 +225,15 @@ def resolve_hatexplain_majority_label(annotators: List[Dict[str, Any]]) -> Optio
     return None
 
 
-def extract_rationales(annotators: List[Dict[str, Any]], num_tokens: int) -> List[int]:
+def extract_rationales(rationale_masks: List[List[int]], num_tokens: int) -> List[int]:
     """
-    Extracts binary rationale token mask across annotators.
-    If at least one annotator flagged a token as a rationale, it is marked 1.
+    HateXplain stores one token mask per annotator who judged the post toxic (post-level "rationales" field).
+    A token is a gold rationale if at least half of those annotators marked it (majority, as in Mathew et al.).
     """
-    mask = [0] * num_tokens
-    for ann in annotators:
-        rats = ann.get("rationales", [])
-        if rats and len(rats) == num_tokens:
-            for idx, val in enumerate(rats):
-                if val == 1:
-                    mask[idx] = 1
-    return mask
+    masks = [m for m in rationale_masks if m and len(m) == num_tokens]
+    if not masks:
+        return [0] * num_tokens
+    return [1 if sum(m[i] for m in masks) * 2 >= len(masks) else 0 for i in range(num_tokens)]
 
 
 def process_hatexplain_data() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, int]]:
@@ -291,7 +287,7 @@ def process_hatexplain_data() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]
             continue
 
         raw_label, mapped_label = resolved
-        rationales = extract_rationales(data.get("annotators", []), len(tokens))
+        rationales = extract_rationales(data.get("rationales", []), len(tokens))
 
         # Extract target communities if annotated
         targets = []

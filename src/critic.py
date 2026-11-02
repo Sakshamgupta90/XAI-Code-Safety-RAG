@@ -174,7 +174,7 @@ class SafetyCritic:
         if labels:
             top_label = max(set(labels), key=labels.count)
             if support == 0.0 and labels.count(top_label) >= self.t["consensus_min_votes"]:
-                reasons.append(f"Gate 3: no retrieved precedent supports the verdict; {labels.count(top_label)}/5 say {top_label}")
+                reasons.append(f"Gate 3: no retrieved precedent supports the verdict ({labels.count(top_label)}/5 say {top_label})")
 
         abstain = bool(reasons)
         return CriticDecision(

@@ -15,6 +15,9 @@ Usage (team workflow, several human annotators):
 Usage (workflow actually used: one human annotator + two LLM annotators, src/annotate_app.py + src/llm_annotate.py):
   python src/agreement.py human           # human vs LLM agreement; writes review_sheet.xlsx (posts both LLMs dispute)
   python src/agreement.py finalize_human  # applies the human's optional review, balances, exports data/eval.xls
+
+Usage (LLM-annotator workflow, permitted by the instructor; human labels override where they exist):
+  python src/agreement.py llm             # 3 LLM annotators, majority vote; agreement report; exports data/eval.xls
 """
 
 import json
@@ -25,6 +28,7 @@ from itertools import combinations
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import numpy as np
 import pandas as pd
 import xlwt
 
@@ -418,7 +422,131 @@ def run_finalize_human():
     print(df_check["label"].value_counts().to_string())
 
 
+# ---------------------------------------------------------------- three LLM annotators (majority vote)
+LLM_ANNOTATORS = ["deepseek", "gemma", "gptoss"]
+
+
+def run_llm_majority():
+    sheets = {}
+    for name in LLM_ANNOTATORS:
+        df = pd.read_csv(SHEETS_DIR / f"llm_annotator_{name}.csv", keep_default_na=False, na_values=[""])
+        df["id"] = df["id"].astype(str)
+        for f in FIELDS:
+            df[f] = [_canonical(f, v) or "INVALID" for v in df[f]]
+        sheets[name] = df.set_index("id")
+    human = load_sheet("human_annotator", required=False)
+    human = human.set_index("id") if human is not None else None
+    ids = sorted(set.intersection(*[set(df.index) for df in sheets.values()]))
+    texts = sheets[LLM_ANNOTATORS[0]]["text"]
+
+    def majority(votes):
+        top, n = Counter(votes).most_common(1)[0]
+        return top if n >= 2 and top != "INVALID" else None
+
+    report_fields = {}
+    for f in FIELDS:
+        cols = {n: [sheets[n].loc[i, f] for i in ids] for n in LLM_ANNOTATORS}
+        pairs = {}
+        for a, b in combinations(LLM_ANNOTATORS, 2):
+            pairs[f"{a}_vs_{b}"] = {"percent_agreement": round(calculate_percent_agreement(cols[a], cols[b]), 2),
+                                    "cohens_kappa": round(calculate_cohens_kappa(cols[a], cols[b]), 4)}
+        matrix = [[cols[n][k] for n in LLM_ANNOTATORS] for k in range(len(ids))]
+        maj = [majority(r) for r in matrix]
+        report_fields[f] = {
+            "pairwise": pairs,
+            "mean_pairwise_percent_agreement": round(float(np.mean([v["percent_agreement"] for v in pairs.values()])), 2),
+            "fleiss_kappa": round(calculate_fleiss_kappa(matrix), 4),
+            "posts_with_majority_pct": round(100 * sum(m is not None for m in maj) / len(ids), 2),
+            "unanimous_pct": round(100 * sum(len(set(r)) == 1 for r in matrix) / len(ids), 2),
+            # agreement of each annotator with the majority label (posts that have one)
+            "annotator_vs_majority_pct": {n: round(100 * np.mean([cols[n][k] == maj[k] for k in range(len(ids)) if maj[k]]), 2)
+                                          for n in LLM_ANNOTATORS},
+        }
+
+    gold = []
+    for k, i in enumerate(ids):
+        votes = {n: sheets[n].loc[i, "category"] for n in LLM_ANNOTATORS}
+        rec = {"id": i, "text": texts.loc[i], **{f"annotator_{n}": v for n, v in votes.items()},
+               "annotator_human": human.loc[i, "category"] if human is not None and i in human.index else ""}
+        if rec["annotator_human"]:
+            for f in FIELDS:
+                rec[f] = human.loc[i, f]
+            rec["label_source"] = "human"
+        else:
+            for f in FIELDS:
+                rec[f] = majority([sheets[n].loc[i, f] for n in LLM_ANNOTATORS])
+            rec["label_source"] = "llm_majority"
+            if rec["category"] is None:
+                continue  # three-way split: no reliable label (dropped, as HateXplain drops no-majority posts)
+            if rec["subjectivity"] == "Objective" or rec["polarity"] is None:
+                rec["polarity"] = "None" if rec["subjectivity"] == "Objective" else (rec["polarity"] or "Negative")
+            rec["subjectivity"] = rec["subjectivity"] or "Subjective"
+            rec["is_sarcastic"] = rec["is_sarcastic"] or "No"
+        rec["unanimous"] = "Yes" if len(set(votes.values())) == 1 else "No"
+        gold.append(rec)
+
+    counts = Counter(g["category"] for g in gold)
+    short = {c: n - counts.get(c, 0) for c, n in TARGET_PER_CLASS.items() if counts.get(c, 0) < n}
+    if short:
+        raise ValueError(f"Not enough labelled posts per class: short by {short} (have {dict(counts)})")
+    rng = random.Random(SEED)
+    final = []
+    for cat, n in TARGET_PER_CLASS.items():
+        pool = [g for g in gold if g["category"] == cat]
+        rng.shuffle(pool)
+        # Agreement-based selection: human-labelled posts first, then posts all three annotators agree on, then
+        # 2-of-3 majority posts (stable sort keeps the seeded random order inside each group)
+        pool.sort(key=lambda g: (g["label_source"] != "human", g["unanimous"] != "Yes"))
+        final.extend(pool[:n])
+    final.sort(key=lambda g: g["id"])
+    for g in final:
+        g["label"] = g["category"]
+    columns = ["id", "text", "label", "subjectivity", "polarity", "is_sarcastic", "label_source",
+               "annotator_human", "annotator_deepseek", "annotator_gemma", "annotator_gptoss", "unanimous"]
+    export_genuine_legacy_xls(final, EVAL_XLS_PATH, columns)
+    with open(DATA_ANNOTATION / "gold_all_annotated.jsonl", "w", encoding="utf-8") as f:
+        for g in gold:
+            f.write(json.dumps(g, ensure_ascii=False) + "\n")
+
+    fin_matrix = [[g[f"annotator_{n}"] for n in LLM_ANNOTATORS] for g in final]
+    report = load_report()
+    report["llm_annotation"] = {
+        "annotators": {"deepseek": "deepseek-ai/DeepSeek-V4.1-Flash", "gemma": "google/gemma-3-27b-it",
+                       "gptoss": "openai/gpt-oss-120b"},
+        "note": "LLM annotation permitted by the course instructor; human labels (annotate_app.py) override where present",
+        "posts_annotated": len(ids), "fields": report_fields,
+        "dropped_three_way_split": len(ids) - len(gold),
+    }
+    report["eval_xls"] = {
+        "total_records": len(final),
+        "label_source": dict(Counter(g["label_source"] for g in final)),
+        "category_on_final_set": {
+            "mean_pairwise_percent_agreement": round(float(np.mean([calculate_percent_agreement(
+                [r[a] for r in fin_matrix], [r[b] for r in fin_matrix]) for a, b in combinations(range(3), 2)])), 2),
+            "fleiss_kappa": round(calculate_fleiss_kappa(fin_matrix), 4),
+            "unanimous_pct": round(100 * sum(g["unanimous"] == "Yes" for g in final) / len(final), 2),
+            "selection": "unanimous posts first, then 2-of-3 majority posts, per class",
+        },
+        "all_fields_on_final_set": {
+            f: round(float(np.mean([calculate_percent_agreement(
+                [sheets[a].loc[g["id"], f] for g in final], [sheets[b].loc[g["id"], f] for g in final])
+                for a, b in combinations(LLM_ANNOTATORS, 2)])), 2) for f in FIELDS},
+        "class_balance": dict(Counter(g["label"] for g in final)),
+        "subjectivity_distribution": dict(Counter(g["subjectivity"] for g in final)),
+        "polarity_distribution": dict(Counter(g["polarity"] for g in final)),
+        "sarcasm_distribution": dict(Counter(g["is_sarcastic"] for g in final)),
+    }
+    save_report(report)
+    c = report_fields["category"]
+    print(f"\nCategory: mean pairwise agreement {c['mean_pairwise_percent_agreement']:.1f}% | Fleiss kappa "
+          f"{c['fleiss_kappa']:.3f} | majority exists for {c['posts_with_majority_pct']:.1f}% | unanimous {c['unanimous_pct']:.1f}%")
+    print(f"Final eval.xls agreement: {report['eval_xls']['category_on_final_set']}")
+    df_check = pd.read_excel(EVAL_XLS_PATH, keep_default_na=False)
+    print(f"[VERIFIED] {EVAL_XLS_PATH.name}: {len(df_check)} rows; sources {dict(Counter(df_check['label_source']))}")
+    print(df_check["label"].value_counts().to_string())
+
+
 if __name__ == "__main__":
     mode = sys.argv[1] if len(sys.argv) > 1 else "main"
     {"pilot": run_pilot, "main": run_main, "finalize": run_finalize,
-     "human": run_human, "finalize_human": run_finalize_human}[mode]()
+     "human": run_human, "finalize_human": run_finalize_human, "llm": run_llm_majority}[mode]()
