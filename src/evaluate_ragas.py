@@ -201,7 +201,7 @@ def main():
             rows.append(p)
         print(f"\nRAGAS for {name} on {len(rows)} posts")
         m = evaluate_config(judge, rows, use_context=name != "G1")
-        if "critic_decision" in rows[0]:
+        if name != "G1" and "critic_decision" in rows[0]:
             acc = [k for k, p in enumerate(rows) if p["critic_decision"]["final_verdict"] != "Needs Human Review"]
             abst = [k for k in range(len(rows)) if k not in set(acc)]
             m["faithfulness_critic_accepted"] = round(float(np.mean([m["per_post"][k]["faithfulness"] for k in acc])), 4) if acc else None
