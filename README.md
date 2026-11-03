@@ -54,8 +54,8 @@ re-running an evaluation reproduces the same outputs at no cost.
 | 4 | `python src/train_baseline.py` | `models/g0_tfidf_lr.joblib` |
 | 5 | `python src/build_eval_pool.py` | annotation pool `data/raw/eval_pool/candidates.jsonl` (1,650 Davidson tweets, leakage-filtered) |
 | 6 | `XAI_ANNOTATOR=<name> streamlit run src/annotate_app.py --server.port 8502`, once per annotator (two group members label all 1,650 posts independently) | `data/annotation/sheets/human_annotator_{saksham,hariharan}.csv` |
-| 7 | `python src/agreement.py humans` (Cohen's κ on the pool, keeps posts with an agreed category, balances classes) | `data/eval.xls`, `data/annotation/agreement_report.json`, `gold_all_annotated.jsonl` |
-| 8 | `python src/build_qrels.py` (then `sheet` / `check` for the human verification) | `data/processed/qrels_policy.json` |
+| 7 | `python src/agreement.py` (Cohen's κ on the pool, keeps posts with an agreed category, balances classes) | `data/eval.xls`, `data/annotation/agreement_report.json`, `gold_all_annotated.jsonl` |
+| 8 | `python src/build_qrels.py` (optional: `sheet` / `check` for a human spot-check of the LLM grades) | `data/processed/qrels_policy.json` |
 | 9 | `python src/evaluate_retrieval.py` | `results/table1_retrieval_ablations.json` (Table 1) |
 | 10 | `python src/evaluate_downstream.py --dataset hatexplain_dev --calibrate` | `results/critic_thresholds.json` |
 | 11 | `python src/evaluate_downstream.py --dataset hatexplain_test` and `--dataset eval_xls` | `results/downstream_*.json`, `results/predictions/` (Table 2) |
