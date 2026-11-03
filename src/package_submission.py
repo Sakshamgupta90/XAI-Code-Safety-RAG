@@ -1,10 +1,10 @@
 """
 src/package_submission.py — builds the two cloud-upload archives named on the report's front page.
 
-  data.zip : knowledge base (policy pages with provenance, processed chunks and precedents), eval.xls, annotation sheets
-             and agreement report, eval pool, qrels and queries, all results (retrieved results, predictions, RAGAS,
-             ablation tables, benchmarks) and SenticNet 9 with its non-commercial licence.
-  code.zip : source code, UI, report generator, README and requirements. Never includes .env, .venv, indexes or caches.
+  data.zip : knowledge base (policy pages with provenance, processed chunks and precedents), eval.xls, the two human
+             annotation sheets and agreement report, eval pool, qrels, all results (retrieved results, predictions, RAGAS,
+             ablation tables, benchmarks) and SenticNet 9 with its non-commercial licence. No run logs.
+  code.zip : source code, UI, README, requirements and .env.example. No report files, .env, .venv, indexes or caches.
 
 Usage: python src/package_submission.py
 """
@@ -16,9 +16,9 @@ ROOT = Path(__file__).resolve().parent.parent
 
 DATA_INCLUDE = ["data/eval.xls", "data/annotation", "data/processed", "data/raw/policies", "data/raw/eval_pool",
                 "data/raw/senticnet", "results"]
-CODE_INCLUDE = ["src", "app.py", "report", "README.md", "requirements.txt", ".streamlit", ".gitignore"]
-SKIP_PARTS = {".venv", "__pycache__", "cache", ".git", "indexes"}
-SKIP_NAMES = {".env", ".DS_Store"}
+CODE_INCLUDE = ["src", "app.py", "README.md", "requirements.txt", ".env.example", ".streamlit"]
+SKIP_PARTS = {".venv", "__pycache__", "cache", ".git", "indexes", "logs"}
+SKIP_NAMES = {".env", ".DS_Store", "package_submission.py"}  # packaging helper
 SKIP_SUFFIXES = {".pkl", ".pdf"}  # pickles are rebuilt by build_indexes.py; the report PDF is submitted separately
 
 

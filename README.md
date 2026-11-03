@@ -28,7 +28,7 @@ post ─► microtext normalisation ─► SenticNet 9 features
 python3.11 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 python -m playwright install chromium      # only needed to re-collect the policy pages
-echo "NEBIUS_API_KEY=<your key>" > .env    # Nebius Token Factory (OpenAI-compatible); never commit this file
+cp .env.example .env                       # then put your Nebius Token Factory key in .env (never commit it)
 ```
 
 Models are downloaded automatically on first use: `BAAI/bge-small-en-v1.5`, `cross-encoder/ms-marco-MiniLM-L-6-v2` and
@@ -36,6 +36,10 @@ Models are downloaded automatically on first use: `BAAI/bge-small-en-v1.5`, `cro
 `Qwen/Qwen3-235B-A22B-Instruct-2507` (relevance assessor and RAGAS judge), both served by Nebius. Override them with
 `XAI_GENERATOR_MODEL` / `XAI_EVALUATOR_MODEL`. Every LLM response is cached in `results/cache/llm_cache.sqlite`, so
 re-running an evaluation reproduces the same outputs at no cost.
+
+**Data zip:** extract `data.zip` into the same folder as this code (both unpack to `xai_online_safety_rag/`). It adds
+`data/` (knowledge base, `eval.xls`, annotations, qrels) and `results/` (all predictions and metric tables), so steps 1, 2,
+5–7 and 9–13 below can be skipped; only `build_indexes.py` and `train_baseline.py` must be run before the UI.
 
 **SenticNet 9:** download `https://sentic.net/senticnet.zip` (non-commercial licence) and convert it with the snippet in
 `data/raw/senticnet/README.md`. The converted `senticnet9.tsv` is included in the data zip with its licence (non-commercial redistribution allowed).
@@ -49,8 +53,8 @@ re-running an evaluation reproduces the same outputs at no cost.
 | 3 | `python src/build_indexes.py` | `indexes/` (BM25 pickles, BGE embeddings, FAISS) |
 | 4 | `python src/train_baseline.py` | `models/g0_tfidf_lr.joblib` |
 | 5 | `python src/build_eval_pool.py` | annotation pool `data/raw/eval_pool/candidates.jsonl` (1,650 Davidson tweets, leakage-filtered) |
-| 6 | `python src/llm_annotate.py` (three LLM annotators); optional human labels with `streamlit run src/annotate_app.py --server.port 8502` | `data/annotation/sheets/llm_annotator_*.csv`, `human_annotator.csv` |
-| 7 | `python src/agreement.py llm` (majority vote, human labels override, agreement-based selection) | `data/eval.xls`, `data/annotation/agreement_report.json` |
+| 6 | `XAI_ANNOTATOR=<name> streamlit run src/annotate_app.py --server.port 8502`, once per annotator (two group members label all 1,650 posts independently) | `data/annotation/sheets/human_annotator_{saksham,hariharan}.csv` |
+| 7 | `python src/agreement.py humans` (Cohen's κ on the pool, keeps posts with an agreed category, balances classes) | `data/eval.xls`, `data/annotation/agreement_report.json`, `gold_all_annotated.jsonl` |
 | 8 | `python src/build_qrels.py` (then `sheet` / `check` for the human verification) | `data/processed/qrels_policy.json` |
 | 9 | `python src/evaluate_retrieval.py` | `results/table1_retrieval_ablations.json` (Table 1) |
 | 10 | `python src/evaluate_downstream.py --dataset hatexplain_dev --calibrate` | `results/critic_thresholds.json` |
@@ -58,8 +62,6 @@ re-running an evaluation reproduces the same outputs at no cost.
 | 12 | `python src/evaluate_ragas.py --dataset hatexplain_test` and `--dataset eval_xls` | `results/ragas_*.json` |
 | 13 | `python src/benchmark_queries.py` | `results/question2_benchmarks.json` (5 queries and latency) |
 | 14 | `streamlit run app.py` | the UI |
-| 15 | `python report/build_report.py` | `report/<group>.pdf` (team details from `report/team.json`) |
-| 16 | `python src/package_submission.py` | `data.zip`, `code.zip` for upload |
 
 ## 3. Code map
 
@@ -73,15 +75,17 @@ re-running an evaluation reproduces the same outputs at no cost.
 | `src/generator.py` | HyDE, the suitcase prompt, the LLM judge, the end-to-end pipeline |
 | `src/sentic.py` | SenticNet 9 concept parsing and Hourglass features |
 | `src/critic.py` | Citation check, DeBERTa NLI gates, precedent consensus, abstention |
-| `src/build_eval_pool.py`, `src/llm_annotate.py`, `src/annotate_app.py`, `src/agreement.py` | Annotation pool, LLM annotators, human-labelling app, Cohen's and Fleiss' kappa, majority vote, `eval.xls` |
+| `src/build_eval_pool.py`, `src/annotate_app.py`, `src/agreement.py` | Annotation pool, human-labelling app, percent agreement and Cohen's kappa, `eval.xls` |
 | `src/build_qrels.py`, `src/evaluate_retrieval.py` | Pooled graded qrels and Table 1 |
 | `src/eval_data.py`, `src/evaluate_downstream.py`, `src/evaluate_ragas.py` | Benchmarks, Table 2 ablation, RAGAS metrics |
 | `src/benchmark_queries.py`, `app.py` | Question 2 queries and the Streamlit UI |
 
 ## 4. Data formats
 
-- `data/eval.xls` (legacy Excel, one row per post): `id, text, label, subjectivity, polarity, is_sarcastic, label_source,
-  annotator_human, annotator_deepseek, annotator_gemma, annotator_gptoss, unanimous`. `label` ∈ {Safe, Hate Speech, Harassment-Offensive}.
+- `data/eval.xls` (legacy Excel, one row per post): `id, text, label, subjectivity, polarity, is_sarcastic, annotator_1,
+  annotator_2, auxiliary_agreed`. `label` ∈ {Safe, Hate Speech, Harassment-Offensive}; `annotator_1/2` are the two human
+  category labels (always equal in this file); `auxiliary_agreed = No` marks rows where the sentiment or sarcasm label was
+  resolved by the rule in `src/agreement.py::_resolve_auxiliary`.
 - `policy_chunks.jsonl`: `id, source, title, section, url, retrieved_on, text, word_count`.
 - `precedent_docs.jsonl`: `id, text, raw_text, tokens, rationales, category, targets, …`.
 - `qrels_policy.json`: per query `query_id, post_id, label, query_raw, judged, qrels{clause_id: 0|1|2}`.

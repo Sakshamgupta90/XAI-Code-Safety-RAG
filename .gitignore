@@ -1,16 +1,16 @@
+# environment and secrets
 .venv/
 .env
 __pycache__/
 *.pyc
-indexes/
-data/raw/hatexplain/
-data/processed/*.pkl
-data/processed/precedent_docs.jsonl
-data/processed/hatexplain_test.jsonl
-data.zip
-code.zip
-results/cache/
 .DS_Store
-report/latex_overleaf.zip
-study_guide/guide.md
-study_guide/guide.html
+
+# not source code: shipped in data.zip / submitted separately
+data/
+results/
+models/
+indexes/
+report/
+study_guide/
+TESTING_AND_SUBMISSION.md
+*.zip

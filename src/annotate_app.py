@@ -5,14 +5,15 @@ Course: NTU AI6127 (2026) — Question 4.
 Shows one post at a time from the label-free pool (data/raw/eval_pool/candidates.jsonl, main + reserve splits,
 pre-shuffled). The annotator picks the sentiment (Objective / Subjective-Positive / Subjective-Negative), ticks
 sarcasm if it applies, then clicks the category button, which saves the row and moves to the next post.
-Labels are appended to data/annotation/sheets/human_annotator.csv after every click, so the session can be
+Labels are appended to data/annotation/sheets/human_annotator_<name>.csv (name from XAI_ANNOTATOR) after every click, so the session can be
 closed and resumed at any time. Stop once every class has >= 333 posts (counts are shown in the sidebar).
 
-Run: streamlit run src/annotate_app.py
+Run: XAI_ANNOTATOR=saksham streamlit run src/annotate_app.py
 """
 
 import csv
 import json
+import os
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,7 +22,7 @@ import streamlit as st
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 POOL_FILE = PROJECT_ROOT / "data" / "raw" / "eval_pool" / "candidates.jsonl"
-OUT_FILE = PROJECT_ROOT / "data" / "annotation" / "sheets" / "human_annotator.csv"
+OUT_FILE = PROJECT_ROOT / "data" / "annotation" / "sheets" / f"human_annotator_{os.environ.get('XAI_ANNOTATOR', '1')}.csv"
 GUIDELINES = PROJECT_ROOT / "data" / "annotation" / "ANNOTATION_GUIDELINES.md"
 FIELDS = ["id", "text", "category", "subjectivity", "polarity", "is_sarcastic", "labelled_at"]
 TARGET = 333
