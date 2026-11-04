@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-src/evaluate_downstream.py - Downstream Evaluation & Ablation Study (Questions 4 & 5, Table 2)
+src/evaluate_downstream.py - Downstream Evaluation & Ablation Study (Questions 4 & 5, report Table 4)
 Course: NTU AI6127 (2026).
 
 Runs every system configuration on a benchmark and scores it with the same code:
