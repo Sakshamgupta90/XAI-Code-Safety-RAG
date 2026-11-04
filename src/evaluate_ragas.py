@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 src/evaluate_ragas.py - Answer-Level RAG Metrics (RAGAS, Es et al., 2023)
-Course: NTU AI6127 (2026) — Question 4 (faithfulness, answer relevance, context precision) and Table 2.
+Course: NTU AI6127 (2026) — Question 4 (faithfulness, answer relevance, context precision) and report Table 6.
 
 Implements the three RAGAS metric definitions directly (the `ragas` package pins numpy/langchain versions
 that conflict with this project's FAISS/torch stack), using an LLM judge that is different from and larger

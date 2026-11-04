@@ -1,7 +1,7 @@
 """
 src/train_baseline.py
 Classical Baseline (G0): TF-IDF + Logistic Regression trained on the HateXplain precedents.
-Course: NTU AI6127 (2026) — Question 4 baseline & Table 2 row G0.
+Course: NTU AI6127 (2026) — Question 4 baseline & report Table 4 row G0.
 
 Actions:
 1. Loads training precedents from data/processed/precedent_docs.jsonl (HateXplain train + val).

@@ -65,7 +65,7 @@ LLM_CONFIGS = {
     "G4": ModerationConfig(use_rag=True, use_sentic=False, use_cot=True, use_critic=False),
     "G3+4": ModerationConfig(use_rag=True, use_sentic=True, use_cot=True, use_critic=False),
 }
-# Table 2 rows: (row id, description, LLM run, critic on/off)
+# Ablation table rows (report Table 4): (row id, description, LLM run, critic on/off)
 TABLE2_ROWS = [
     ("G0", "TF-IDF + Logistic Regression baseline", None, False),
     ("G1", "Zero-shot LLM (no retrieval)", "G1", False),
@@ -342,7 +342,7 @@ def main():
     out_file.write_text(json.dumps(summary, indent=2, default=str))
 
     print("\n" + "=" * 110)
-    print(f"Table 2 — {args.dataset} (n={len(records)})")
+    print(f"Ablation — {args.dataset} (n={len(records)})")
     print("=" * 110)
     print(f"{'Row':<6} {'Description':<40} {'MacroF1':>8} {'Acc':>6} {'Cover':>6} {'SelF1':>6} {'Lat(ms)':>8} {'$/1k':>7}")
     for r in rows:
